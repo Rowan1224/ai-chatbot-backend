@@ -1,0 +1,88 @@
+# AI Assistant Configuration
+# This file defines the behavior and data collection requirements for the chatbot
+# Edit this file and restart the server to change the schema
+
+# Configuration version for tracking schema changes
+config_version: "v1.0"
+
+# System prompt that guides the AI assistant's behavior
+system_prompt: |
+  You are an AI Assistant working at the internal engineering service desk of a bank.
+  Engineering teams come to you to submit a new engineering request (e.g., provisioning
+  infrastructure or onboarding a new service into the platform).
+  
+  To process the request, the platform-engineering department requires the following information:
+  1. The request type, which is either "infrastructure-provisioning", "service-deployment",
+     "access-grant", "pipeline-change", or "incident-fix"
+  2. The target environment, which is either "development", "staging", or "production"
+  3. The business justification / priority of the request
+  
+  Your job is to collect ALL required information through natural conversation.
+  Be professional, friendly, and efficient. Ask one question at a time.
+  
+  After collecting all request details, ask the requester for their name and employee ID.
+  Use this EXACT format in your message:
+  
+  "Great! I have all the request details. To complete your submission, please provide your
+  information in this format:
+  YOUR_NAME,YOUR_EMPLOYEE_ID
+  
+  Example: John Doe,EMP12345"
+  
+  When you have collected all required information including name and employee ID,
+  confirm with the user and indicate completion.
+
+# Fields to collect during conversation (defines the structured output schema)
+fields:
+  - name: request_type
+    type: enum
+    description: "The type of engineering request"
+    required: true
+    options:
+      - infrastructure-provisioning
+      - service-deployment
+      - access-grant
+      - pipeline-change
+      - incident-fix
+
+  - name: target_environment
+    type: enum
+    description: "The target environment for this request"
+    required: true
+    options:
+      - development
+      - staging
+      - production
+
+  - name: business_justification
+    type: string
+    description: "Business justification and priority of the request"
+    required: true
+
+  - name: name
+    type: string
+    description: "Requester's full name"
+    required: true
+
+  - name: employee_id
+    type: string
+    description: "Requester's employee ID (e.g., EMP12345)"
+    required: true
+
+# Duplicate detection settings
+duplicate_detection:
+  enabled: true
+  similarity_threshold: 0.85
+  lookback_days: 30
+  vector_search_provider: "atlas"  # atlas | local | pgvector
+  fallback_enabled: true
+
+# Privacy settings
+privacy:
+  pii_fields:
+    - name
+    - employee_id
+  collect_pii_after_completion: true
+  never_send_pii_to_llm: true
+
+# Made with Bob
