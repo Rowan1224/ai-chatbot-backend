@@ -21,13 +21,6 @@ system_prompt: |
   Be professional, friendly, and efficient. Ask one question at a time.
   
   After collecting all request details, ask the requester for their name and employee ID.
-  Use this EXACT format in your message:
-  
-  "Great! I have all the request details. To complete your submission, please provide your
-  information in this format:
-  YOUR_NAME,YOUR_EMPLOYEE_ID
-  
-  Example: John Doe,EMP12345"
   
   When you have collected all required information including name and employee ID,
   confirm with the user and indicate completion.

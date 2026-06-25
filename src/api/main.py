@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException, Header, status
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.messages import HumanMessage
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.redis import AsyncRedisSaver
 
 from src.api.models import (
     ChatRequest,
@@ -40,13 +42,25 @@ async def lifespan(app: FastAPI):
     await mongodb_client.connect()
     logger.info("MongoDB connected")
     
-    # Connect to Redis
-    # redis_client.connect()
-    logger.info("Redis connected")
+    # Create LangGraph checkpointer based on environment
+    if settings.use_redis_checkpointer:
+        # Production/Test/Acc: Use Redis for persistence
+        await redis_client.connect()
+        logger.info("Redis connected")
+        
+        redis_conn = await redis_client.get_client()
+        checkpointer = AsyncRedisSaver(redis_client=redis_conn)
+        await checkpointer.asetup()
+        
+        logger.info(f"Using Redis checkpointer at {settings.redis_url}")
+    else:
+        # Development: Use in-memory (no persistence between restarts)
+        checkpointer = InMemorySaver()
+        logger.info("Using InMemory checkpointer (dev mode - no persistence)")
     
-    # Initialize workflow with clients
-    workflow = ConversationWorkflow(mongodb_client=mongodb_client, redis_client=redis_client)
-    conversation_app = workflow.compile()
+    # Initialize workflow with clients and compile with checkpointer
+    workflow = ConversationWorkflow(mongodb_client=mongodb_client)
+    conversation_app = workflow.compile(checkpointer=checkpointer)
     logger.info("LangGraph workflow compiled")
     
     # Store in app state for access in endpoints
@@ -60,8 +74,10 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down AI Chatbot Backend...")
     await mongodb_client.close()
     logger.info("MongoDB connection closed")
-    # redis_client.close()
-    logger.info("Redis connection closed")
+    
+    if settings.use_redis_checkpointer:
+        await redis_client.close()
+        logger.info("Redis connection closed")
 
 
 # Create FastAPI app
@@ -198,9 +214,13 @@ async def health_check() -> HealthResponse:
         logger.error(f"MongoDB health check failed: {e}")
     
     try:
-        # Check Redis
-        # app.state.redis_client.get_client().ping()
-        redis_status = "connected"
+        # Check Redis (only if using Redis checkpointer)
+        if settings.use_redis_checkpointer:
+            client = await app.state.redis_client.get_client()
+            await client.ping()
+            redis_status = "connected"
+        else:
+            redis_status = "disabled (dev mode)"
     except Exception as e:
         logger.error(f"Redis health check failed: {e}")
     

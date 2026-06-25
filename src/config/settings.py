@@ -52,6 +52,13 @@ class Settings(BaseSettings):
 
     # Redis Configuration
     redis_url: str = Field(default="redis://localhost:6379", description="Redis connection URL")
+    redis_host: str = Field(default="localhost", description="Redis connection Host")
+    redis_port: int = Field(default=6379, description="Redis connection Port")
+    redis_password: Optional[str] = Field(default=None, description="Redis connection Password")
+    use_redis_checkpointer: bool = Field(
+        default=True,
+        description="Use Redis for LangGraph checkpointing (False = InMemory for dev/test)"
+    )
 
     # API Configuration
     api_key: str = Field(default="dev-api-key-12345", description="API key for authentication")

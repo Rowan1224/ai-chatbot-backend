@@ -53,15 +53,16 @@ class TestRedisClient:
         assert client is not None
         assert client.client is None  # Not connected yet
     
-    def test_connect_sets_client(self):
+    @pytest.mark.asyncio
+    async def test_connect_sets_client(self):
         """Test that connect() initializes client."""
         with patch('src.core.database.Redis') as mock_redis:
             mock_client_instance = MagicMock()
-            mock_client_instance.ping.return_value = True
-            mock_redis.from_url.return_value = mock_client_instance
+            mock_client_instance.ping = AsyncMock(return_value=True)
+            mock_redis.return_value = mock_client_instance
             
             client = RedisClient()
-            client.connect()
+            await client.connect()
             
             assert client.client is not None
 

@@ -2,12 +2,10 @@
 
 import logging
 import operator
-from tabnanny import check
 from typing import Annotated, Any, Dict, List, Optional, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
-from langgraph.checkpoint.redis import RedisSaver
-from langgraph.checkpoint.memory import InMemorySaver  
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field
 
@@ -57,19 +55,15 @@ class ConversationState(TypedDict):
     config_version: str
     update_existing: bool  # True if user wants to update existing request
     existing_request_id: Optional[str]  # ID of request to update
-    temp_pii: Dict[str, str]  # Temporary storage for PII during confirmation
-    awaiting_confirmation: bool  # True when waiting for user to confirm PII
-    pii_collected: bool  # True when PII has been confirmed and collected
     awaiting_duplicate_decision: bool  # True when waiting for user to choose update/new
 
 
 class ConversationWorkflow:
     """LangGraph workflow for conversational data collection."""
 
-    def __init__(self, mongodb_client: MongoDBClient, redis_client: RedisClient) -> None:
+    def __init__(self, mongodb_client: MongoDBClient) -> None:
         """Initialize the workflow with database clients."""
         self.mongodb_client = mongodb_client
-        self.redis_client = redis_client
         
         self.llm = get_llm()
         self.embedding_model = get_embedding_model()
@@ -107,10 +101,11 @@ class ConversationWorkflow:
 
     async def extract_node(self, state: ConversationState) -> Dict[str, Any]:
         """
-        Extract structured data from conversation.
+        Extract structured data from conversation including ALL fields (business + PII).
         
         Only called when is_ready=True.
         Uses RequestSchema (dynamically generated from config).
+        LLM extracts everything in one go - simple and straightforward.
         """
         logger.info("Extract node: Extracting structured data")
         
@@ -125,11 +120,11 @@ class ConversationWorkflow:
             extracted = self.llm_extract.invoke(messages)
             data = schema_to_dict(extracted)
             
-            logger.info(f"Successfully extracted data: {data}")
+            logger.info(f"Successfully extracted data with {len(data)} fields")
             
             return {
                 "collected_data": data,
-                "is_complete": False,  # Not complete until PII collected and saved
+                "is_complete": True,  # Complete after extraction
                 "config_version": prompt_config.config_version,
             }
             
@@ -238,6 +233,7 @@ class ConversationWorkflow:
                 "duplicate_warning": warnings,
                 "messages": [duplicate_msg],
                 "awaiting_duplicate_decision": True,  # Set flag to wait for decision
+                "is_complete": False,  # Keep session open for user decision
             }
         
         logger.info("No duplicates found (exact or semantic)")
@@ -248,7 +244,6 @@ class ConversationWorkflow:
         Handle user's decision on duplicate: update existing or create new.
         
         Uses LLM with structured output for robust parsing.
-        No privacy concerns here - just parsing 'update' or 'new' choice.
         """
         logger.info("Handle duplicate decision node: Processing user choice")
         
@@ -326,212 +321,18 @@ class ConversationWorkflow:
                     content="❌ Error processing your choice. Please respond with 'update' or 'new'."
                 )]
             }
-    # Helper methods for PII handling
-    def _get_message_content(self, messages: List[BaseMessage]) -> str:
-        """Extract string content from last HumanMessage."""
-        if not messages:
-            return ""
-        
-        # Find the last HumanMessage (user input)
-        from langchain_core.messages import HumanMessage
-        for msg in reversed(messages):
-            if isinstance(msg, HumanMessage):
-                content = msg.content if hasattr(msg, 'content') else str(msg)
-                if isinstance(content, list):
-                    content = str(content[0]) if content else ""
-                return content
-        
-        return ""
-    
-    def _parse_pii(self, content: str) -> tuple[bool, str, str, str]:
-        """
-        Parse PII from content string.
-        
-        Returns:
-            (success, name, employee_id, error_message)
-        """
-        try:
-            parts = [p.strip() for p in content.split(',')]
-            
-            if len(parts) != 2:
-                return (False, "", "", "Please provide exactly 2 values separated by comma")
-            
-            name, employee_id = parts
-            
-            if not name or len(name) < 2:
-                return (False, "", "", "Name must be at least 2 characters")
-            
-            if not employee_id.startswith("EMP"):
-                return (False, "", "", "Employee ID must start with 'EMP'")
-            
-            return (True, name, employee_id, "")
-            
-        except Exception as e:
-            return (False, "", "", f"Parsing error: {str(e)}")
-    
-    def _format_pii_request_message(self) -> str:
-        """Format message requesting PII in correct format."""
-        return (
-            "Please provide your information in the correct format:\n"
-            "YOUR_NAME,YOUR_EMPLOYEE_ID\n\n"
-            "Example: John Doe,EMP12345"
-        )
-    
-    def _format_pii_confirmation_message(self, name: str, employee_id: str) -> str:
-        """Format message asking for PII confirmation."""
-        return (
-            f"Please confirm your information:\n\n"
-            f"Name: {name}\n"
-            f"Employee ID: {employee_id}\n\n"
-            f"Reply 'yes' to confirm, or provide corrections in format:\n"
-            f"YOUR_NAME,YOUR_EMPLOYEE_ID"
-        )
-
-    def collect_pii_node(self, state: ConversationState) -> Dict[str, Any]:
-        """
-        Parse PII from user input without using LLM.
-        
-        Expected format: NAME,EMPLOYEE_ID
-        Example: John Doe,EMP12345
-        """
-        messages = state["messages"]
-        content = self._get_message_content(messages)
-        
-        if not content:
-            return {
-                "messages": [AIMessage(content=self._format_pii_request_message())],
-                "awaiting_confirmation": False,
-                "pii_collected": False
-            }
-        
-        logger.info(f"Collect PII node: Parsing input: {content[:50]}...")
-        
-        # Parse PII
-        success, name, employee_id, error_msg = self._parse_pii(content)
-        
-        if not success:
-            logger.warning(f"PII parsing failed: {error_msg}")
-            return {
-                "messages": [AIMessage(content=f"{error_msg}\n\n{self._format_pii_request_message()}")],
-                "awaiting_confirmation": False,
-                "pii_collected": False
-            }
-        
-        # Success - store in temp and ask for confirmation
-        logger.info(f"PII parsed successfully: name={name[:10]}..., emp_id={employee_id}")
-        
-        return {
-            "temp_pii": {"name": name, "employee_id": employee_id},
-            "messages": [AIMessage(content=self._format_pii_confirmation_message(name, employee_id))],
-            "awaiting_confirmation": True,
-            "pii_collected": False
-        }
-
-    def confirm_pii_node(self, state: ConversationState) -> Dict[str, Any]:
-        """
-        Handle user confirmation or corrections of PII.
-        
-        User can reply 'yes' to confirm or provide corrections in NAME,EMPLOYEE_ID format.
-        """
-        messages = state["messages"]
-        temp_pii = state.get("temp_pii", {})
-        content = self._get_message_content(messages)
-        
-        if not content:
-            return {
-                "messages": [AIMessage(content="Please confirm your information.")],
-                "awaiting_confirmation": True,
-                "pii_collected": False
-            }
-        
-        content_lower = content.lower().strip()
-        logger.info(f"Confirm PII node: User response: {content[:50]}...")
-        
-        # Check for confirmation
-        if content_lower in ['yes', 'y', 'correct', 'confirm', 'ok', 'okay']:
-            logger.info("PII confirmed by user")
-            
-            # Move PII from temp to collected_data
-            collected_data = state.get("collected_data", {}).copy()
-            collected_data["name"] = temp_pii.get("name", "")
-            collected_data["employee_id"] = temp_pii.get("employee_id", "")
-            
-            return {
-                "collected_data": collected_data,
-                "pii_collected": True,
-                "awaiting_confirmation": False,
-                "is_complete": False,  # Not complete yet - need to check duplicates and save
-                "messages": [AIMessage(content="✅ Information confirmed. Processing your request...")]
-            }
-        
-        # Check if user is providing corrections (contains comma)
-        elif ',' in content:
-            logger.info("User providing PII corrections")
-            
-            success, name, employee_id, error_msg = self._parse_pii(content)
-            
-            if not success:
-                return {
-                    "messages": [
-                        AIMessage(content=(
-                            f"{error_msg}\n\n"
-                            f"Current values:\n"
-                            f"Name: {temp_pii.get('name', 'N/A')}\n"
-                            f"Employee ID: {temp_pii.get('employee_id', 'N/A')}\n\n"
-                            f"Format: YOUR_NAME,YOUR_EMPLOYEE_ID"
-                        ))
-                    ],
-                    "awaiting_confirmation": True,
-                    "pii_collected": False
-                }
-            
-            # Update temp_pii with corrections
-            logger.info(f"PII corrected: name={name[:10]}..., emp_id={employee_id}")
-            
-            return {
-                "temp_pii": {"name": name, "employee_id": employee_id},
-                "messages": [AIMessage(content=self._format_pii_confirmation_message(name, employee_id))],
-                "awaiting_confirmation": True,
-                "pii_collected": False
-            }
-        
-        # Unclear response
-        else:
-            logger.warning(f"Unclear confirmation response: {content[:50]}")
-            return {
-                "messages": [
-                    AIMessage(content=(
-                        "Please reply 'yes' to confirm, or provide corrections in format:\n"
-                        "YOUR_NAME,YOUR_EMPLOYEE_ID\n\n"
-                        f"Current values:\n"
-                        f"Name: {temp_pii.get('name', 'N/A')}\n"
-                        f"Employee ID: {temp_pii.get('employee_id', 'N/A')}"
-                    ))
-                ],
-                "awaiting_confirmation": True,
-                "pii_collected": False
-            }
 
     async def save_node(self, state: ConversationState) -> Dict[str, Any]:
         """
         Save or update the collected data in MongoDB.
         
-        PII should already be collected and confirmed at this point.
+        All data (including PII) is already in collected_data from extract_node.
         If update_existing=True, updates the existing request.
         Otherwise, creates a new request.
         """
         collected_data = state["collected_data"].copy()  # Make a copy to avoid mutating state
         update_existing = state.get("update_existing", False)
         existing_request_id = state.get("existing_request_id")
-        
-        # PII should already be in collected_data from confirm_pii_node
-        # Just verify it's there
-        if "name" not in collected_data or "employee_id" not in collected_data:
-            logger.error("Save node called without PII in collected_data!")
-            return {
-                "messages": [AIMessage(content="❌ Error: Missing PII data. Please try again.")],
-                "is_complete": False
-            }
         
         # Generate embedding for future duplicate detection (excluding PII)
         text_fields = get_text_fields()
@@ -554,7 +355,7 @@ class ConversationWorkflow:
                 success_msg = AIMessage(
                     content=f"✅ Your existing request has been successfully updated!\n"
                            f"Request ID: {existing_request_id}\n\n"
-                           f"Thank you, {collected_data['name']}!"
+                           f"Thank you!"
                 )
             else:
                 success_msg = AIMessage(
@@ -566,7 +367,7 @@ class ConversationWorkflow:
                 success_msg = AIMessage(
                     content=f"✅ New request created successfully!\n"
                            f"Request ID: {request_id}\n\n"
-                           f"Thank you, {collected_data['name']}!"
+                           f"Thank you!"
                 )
         else:
             # Create new request
@@ -579,7 +380,7 @@ class ConversationWorkflow:
             success_msg = AIMessage(
                 content=f"✅ Your request has been successfully submitted!\n"
                        f"Request ID: {request_id}\n\n"
-                       f"Thank you, {collected_data['name']}!"
+                       f"Thank you!"
             )
         
         return {
@@ -592,12 +393,6 @@ class ConversationWorkflow:
         if state.get("is_ready", False):
             return "extract"
         return END
-
-    def should_check_duplicates(self, state: ConversationState) -> str:
-        """Routing: Check duplicates if extraction complete, otherwise back to chat."""
-        if state.get("is_complete", False):
-            return "duplicate_check"
-        return "chat"
 
     def should_save(self, state: ConversationState) -> str:
         """
@@ -625,83 +420,33 @@ class ConversationWorkflow:
             return END
         # Valid decision made, proceed to save
         return "save"
+
     def route_entry(self, state: ConversationState) -> str:
         """
-        Entry point routing - CRITICAL for privacy!
+        Entry point routing.
         
-        Routes to appropriate node based on state, bypassing chat when handling PII.
-        This prevents the LLM from seeing PII data.
+        Routes to appropriate node based on state.
         """
         # If we're waiting for duplicate decision, route to handler
         if state.get("awaiting_duplicate_decision"):
             return "handle_duplicate_decision"
         
-        # If we're waiting for PII input, go directly to collect_pii (bypass chat!)
-        if state.get("is_complete") and not state.get("pii_collected") and not state.get("awaiting_confirmation"):
-            return "collect_pii"
-        
-        # If we're waiting for PII confirmation, go directly to confirm_pii (bypass chat!)
-        if state.get("awaiting_confirmation"):
-            return "confirm_pii"
-        
         # Otherwise, normal chat flow
         return "chat"
-    
-    def should_collect_pii(self, state: ConversationState) -> str:
-        """
-        Determine if we should collect PII or proceed to duplicate check.
-        
-        After extraction, check if PII is already collected.
-        """
-        if state.get("pii_collected"):
-            return "duplicate_check"
-        else:
-            return "collect_pii"
-    
-    def should_confirm_pii(self, state: ConversationState) -> str:
-        """
-        Determine routing after PII collection.
-        
-        If awaiting confirmation, go to confirm node.
-        Otherwise, back to collect node for retry.
-        """
-        if state.get("awaiting_confirmation"):
-            return "confirm_pii"
-        else:
-            return "collect_pii"
-    
-    def after_confirm_pii(self, state: ConversationState) -> str:
-        """
-        Determine routing after PII confirmation.
-        
-        If PII collected, proceed to duplicate check.
-        Otherwise, stay in confirmation loop.
-        """
-        if state.get("pii_collected"):
-            return "duplicate_check"
-        elif state.get("awaiting_confirmation"):
-            return "confirm_pii"
-        else:
-            return "collect_pii"
-
 
     def build_graph(self) -> StateGraph:
         """
         Build the LangGraph workflow.
         
-        Flow:
+        Simplified flow:
         1. chat -> Continue conversation (structured output with is_ready flag)
-        2. extract -> Extract full data when ready
-        3. collect_pii -> Parse NAME,EMPLOYEE_ID format
-        4. confirm_pii -> Handle confirmation or corrections
-        5. duplicate_check -> Find similar requests
-        6. handle_duplicate_decision -> Parse user's choice (update/new)
-        7. save -> Persist to MongoDB (create new or update existing)
+        2. extract -> Extract ALL data including PII when ready
+        3. duplicate_check -> Find similar requests
+        4. handle_duplicate_decision -> Parse user's choice (update/new)
+        5. save -> Persist to MongoDB (create new or update existing)
         
         Human intervention points:
         - After each chat message (API returns, waits for next user input)
-        - After collect_pii (wait for user to provide PII)
-        - After confirm_pii (wait for user confirmation)
         - After duplicate_check (if duplicates found, user must choose update/new)
         - After handle_duplicate_decision (if invalid choice, wait for retry)
         """
@@ -710,19 +455,15 @@ class ConversationWorkflow:
         # Add nodes
         workflow.add_node("chat", self.chat_node)
         workflow.add_node("extract", self.extract_node)
-        workflow.add_node("collect_pii", self.collect_pii_node)
-        workflow.add_node("confirm_pii", self.confirm_pii_node)
         workflow.add_node("duplicate_check", self.duplicate_check_node)
         workflow.add_node("handle_duplicate_decision", self.handle_duplicate_decision_node)
         workflow.add_node("save", self.save_node)
         
-        # Set entry point with conditional routing (CRITICAL for privacy!)
+        # Set entry point with conditional routing
         workflow.set_conditional_entry_point(
             self.route_entry,
             {
                 "chat": "chat",
-                "collect_pii": "collect_pii",
-                "confirm_pii": "confirm_pii",
                 "handle_duplicate_decision": "handle_duplicate_decision",
             }
         )
@@ -737,30 +478,8 @@ class ConversationWorkflow:
             }
         )
         
-        # Routing from extract -> collect_pii or duplicate_check
-        workflow.add_conditional_edges(
-            "extract",
-            self.should_collect_pii,
-            {
-                "collect_pii": "collect_pii",
-                "duplicate_check": "duplicate_check",  # If PII already collected
-            }
-        )
-        
-        # Routing from collect_pii -> confirm_pii (always, after parsing)
-        # The collect_pii node sets awaiting_confirmation=True
-        workflow.add_edge("collect_pii", END)  # Wait for user to provide PII
-        
-        # Routing from confirm_pii -> duplicate_check or back to collect_pii
-        workflow.add_conditional_edges(
-            "confirm_pii",
-            self.after_confirm_pii,
-            {
-                "duplicate_check": "duplicate_check",  # PII confirmed
-                "collect_pii": "collect_pii",  # Need corrections
-                "confirm_pii": "confirm_pii",  # Still awaiting clear response
-            }
-        )
+        # Routing from extract -> duplicate_check
+        workflow.add_edge("extract", "duplicate_check")
         
         # Routing from duplicate_check
         workflow.add_conditional_edges(
@@ -787,31 +506,35 @@ class ConversationWorkflow:
         
         return workflow
 
-    def compile(self):
+    def compile(self, checkpointer: BaseCheckpointSaver):
         """
-        Compile the workflow with Redis checkpointing.
+        Compile the workflow with the provided checkpointer.
+        
+        Args:
+            checkpointer: LangGraph checkpointer (e.g., RedisSaver, InMemorySaver)
         
         Returns:
             Compiled LangGraph application
         """
-        #TODO Connect to Redis
-        # redis_client.connect()
-        
-        # Create Redis checkpointer
-        checkpointer = InMemorySaver()
-        
         # Build and compile workflow
         graph = self.build_graph()
         self.app = graph.compile(checkpointer=checkpointer)
         
-        logger.info("LangGraph workflow compiled with Redis checkpointing")
+        logger.info(f"LangGraph workflow compiled with {type(checkpointer).__name__}")
         
         return self.app
 
     def get_app(self):
-        """Get the compiled application."""
+        """
+        Get the compiled application.
+        
+        Raises:
+            RuntimeError: If app hasn't been compiled yet
+        """
         if not self.app:
-            return self.compile()
+            raise RuntimeError(
+                "Workflow not compiled. Call compile(checkpointer) first."
+            )
         return self.app
 
 

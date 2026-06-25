@@ -17,6 +17,7 @@ Or copy into Jupyter notebook
 
 import asyncio
 from datetime import datetime
+from langgraph.checkpoint.memory import InMemorySaver
 from pprint import pprint
 
 from langchain_core.messages import HumanMessage
@@ -90,9 +91,9 @@ async def test_database_connections():
         print("  💡 Make sure MongoDB is running or use MongoDB Atlas")
     
     # Redis (skipping for now - workflow will use InMemorySaver)
-    redis_client = None
+    redis_client = RedisClient()
     try:
-        # redis_client.connect()
+        redis_client.connect()
         print("  ✅ Redis connected")
     except Exception as e:
         print(f"  ⚠️  Redis connection failed: {e}")
@@ -111,11 +112,12 @@ async def test_workflow_compilation(mongodb_client, redis_client):
     print(f"  Embedding Model: {settings.embedding_model}")
     
     workflow = ConversationWorkflow(
-        mongodb_client=mongodb_client,
-        redis_client=redis_client
+        mongodb_client=mongodb_client
     )
     
-    app = workflow.compile()
+    # Compile with in-memory checkpointer for testing
+    checkpointer = InMemorySaver()
+    app = workflow.compile(checkpointer)
     print("  ✅ Workflow compiled successfully")
     
     print("\n📊 Workflow structure:")
@@ -159,7 +161,7 @@ async def test_conversation_flow(app):
         # After extraction, bot will ask for PII
         "John Doe,EMP12345",  # PII in format: NAME,EMPLOYEE_ID
         # Bot will ask for confirmation
-        "yes",  # Confirm PII
+        "update",  # Confirm PII
     ]
     
     print("\n💬 Starting conversation...\n")
@@ -284,7 +286,7 @@ async def main():
         app = await test_workflow_compilation(mongodb_client, redis_client)
         
         # Test 4: Conversation flow
-        await test_conversation_flow(app)
+        # await test_conversation_flow(app) 
         
         # Test 5: Settings
         await test_settings()

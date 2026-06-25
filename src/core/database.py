@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure
-from redis import Redis
+from redis.asyncio import Redis
 
 from src.config.settings import settings
 
@@ -78,29 +78,34 @@ class RedisClient:
         """Initialize Redis client."""
         self.client: Optional[Redis] = None
 
-    def connect(self) -> None:
+    async def connect(self) -> None:
         """Connect to Redis."""
         try:
-            self.client = Redis.from_url(settings.redis_url, decode_responses=True)
+            self.client = Redis(
+                host=settings.redis_host,
+                port=settings.redis_port,
+                decode_responses=True,
+                protocol=2,
+                )
             
             # Test connection
-            self.client.ping()
+            await self.client.ping()
             logger.info("Connected to Redis")
             
         except Exception as e:
             logger.error(f"Failed to connect to Redis: {e}")
             raise
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """Close Redis connection."""
         if self.client:
-            self.client.close()
+            await self.client.close()
             logger.info("Redis connection closed")
 
-    def get_client(self) -> Redis:
+    async def get_client(self) -> Redis:
         """Get Redis client instance."""
         if not self.client:
-            self.connect()
+            await self.connect()
         return self.client
 
 
