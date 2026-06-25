@@ -286,7 +286,7 @@ async def main():
         app = await test_workflow_compilation(mongodb_client, redis_client)
         
         # Test 4: Conversation flow
-        # await test_conversation_flow(app) 
+        await test_conversation_flow(app) 
         
         # Test 5: Settings
         await test_settings()

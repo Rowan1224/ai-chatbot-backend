@@ -1,81 +1,64 @@
 # AI Assistant Configuration
-# This file defines the behavior and data collection requirements for the chatbot
-# Edit this file and restart the server to change the schema
+# ─────────────────────────────────────────────────────────────────────────────
+# Edit this file and restart the server to reconfigure the chatbot.
+#
+# HOW THE SCHEMA WORKS:
+#   The extraction schema is defined in code, not here. Three fields are always
+#   collected regardless of the prompt:
+#     • request_type  — used for fuzzy duplicate detection
+#     • name          — PII, never sent to embeddings
+#     • employee_id   — PII, never sent to embeddings
+#
+#   Everything else the LLM extracts from the conversation is stored
+#   schema-free in `additional_data`. Change the system_prompt below
+#   to collect different fields — no code or database migration needed.
+#   Historical records are preserved exactly as originally stored.
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Configuration version for tracking schema changes
-config_version: "v1.0"
+config_version: "v2.0"
 
-# System prompt that guides the AI assistant's behavior
+# System prompt — guides the AI assistant's conversation behaviour.
+# Replace this entirely to adapt the chatbot to a different domain.
 system_prompt: |
-  You are an AI Assistant working at the internal engineering service desk of a bank.
-  Engineering teams come to you to submit a new engineering request (e.g., provisioning
-  infrastructure or onboarding a new service into the platform).
-  
-  To process the request, the platform-engineering department requires the following information:
-  1. The request type, which is either "infrastructure-provisioning", "service-deployment",
-     "access-grant", "pipeline-change", or "incident-fix"
-  2. The target environment, which is either "development", "staging", or "production"
-  3. The business justification / priority of the request
-  
-  Your job is to collect ALL required information through natural conversation.
-  Be professional, friendly, and efficient. Ask one question at a time.
-  
-  After collecting all request details, ask the requester for their name and employee ID.
-  
-  When you have collected all required information including name and employee ID,
-  confirm with the user and indicate completion.
+  You are an AI Assistant at the internal engineering service desk of a bank.
+  Engineering teams submit requests to you (e.g. provisioning infrastructure,
+  deploying a service, or requesting access).
 
-# Fields to collect during conversation (defines the structured output schema)
-fields:
-  - name: request_type
-    type: enum
-    description: "The type of engineering request"
-    required: true
-    options:
-      - infrastructure-provisioning
-      - service-deployment
-      - access-grant
-      - pipeline-change
-      - incident-fix
+  You must always collect the following information:
 
-  - name: target_environment
-    type: enum
-    description: "The target environment for this request"
-    required: true
-    options:
-      - development
-      - staging
-      - production
+  1. Request type — one of:
+       "infrastructure-provisioning", "service-deployment", "access-grant",
+       "pipeline-change", "incident-fix"
+  2. Target environment — one of: "development", "staging", "production"
+  3. Business justification / priority of the request
 
-  - name: business_justification
-    type: string
-    description: "Business justification and priority of the request"
-    required: true
+  After collecting the request details, ask for:
+  4. The requester's full name
+  5. The requester's employee ID (format: EMP followed by digits, e.g. EMP12345)
 
-  - name: name
-    type: string
-    description: "Requester's full name"
-    required: true
+  Conduct the conversation naturally and professionally. Ask one question at a
+  time. Once you have all five pieces of information, confirm them with the user
+  and indicate that the submission is complete.
 
-  - name: employee_id
-    type: string
-    description: "Requester's employee ID (e.g., EMP12345)"
-    required: true
+  EXTRACTION INSTRUCTIONS (used when the conversation is complete):
+  • Set request_type to the normalised value from the list above.
+  • Set name and employee_id to what the user provided.
+  • Put target_environment and business_justification in additional_data.
 
 # Duplicate detection settings
 duplicate_detection:
   enabled: true
   similarity_threshold: 0.85
-  lookback_days: 30
-  vector_search_provider: "atlas"  # atlas | local | pgvector
+  lookback_days: 90
+  vector_search_provider: "pgvector"  # pgvector | local
   fallback_enabled: true
 
 # Privacy settings
+# pii_fields lists the fields that are NEVER sent to the embedding model.
+# request_type is intentionally excluded here — it IS used for fuzzy matching.
 privacy:
   pii_fields:
     - name
     - employee_id
-  collect_pii_after_completion: true
-  never_send_pii_to_llm: true
 
 # Made with Bob

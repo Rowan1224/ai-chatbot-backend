@@ -11,15 +11,18 @@ from pydantic import BaseModel, Field
 
 from src.config.settings import prompt_config, settings
 from src.core.database import (
-    MongoDBClient,
+    PostgreSQLClient,
     RedisClient,
-    find_exact_match_duplicates,
+    find_fuzzy_candidates,
     find_similar_requests,
     save_request,
-    update_request,
 )
 from src.core.llm import get_embedding_model, get_llm
-from src.core.schema import RequestSchema, get_text_fields, schema_to_dict
+from src.core.schema import (
+    ExtractedRequest,
+    extracted_to_dict,
+    get_text_fields,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,19 +36,51 @@ class ChatResponse(BaseModel):
     )
 
 
+class DuplicateJudgement(BaseModel):
+    """LLM verdict on whether a candidate record is a true duplicate."""
+
+    is_duplicate: bool = Field(
+        description=(
+            "True if the candidate request represents the same intent "
+            "as the new request — i.e. same purpose, same target, same "
+            "scope.  False if any meaningful field differs (e.g. "
+            "different environment, system, date, or access level)."
+        )
+    )
+    reasoning: str = Field(
+        description=(
+            "One sentence explaining what is the same or different "
+            "between the two requests."
+        )
+    )
+
+
 class DuplicateDecision(BaseModel):
     """Structured response for duplicate decision."""
 
     choice: str = Field(
-        description="User's choice: either 'update' to update existing request or 'new' to create new request"
+        description=(
+            "User's choice — one of:\n"
+            "  'modify'  — user wants to go back to chat and change "
+            "something in their current request\n"
+            "  'proceed' — the request is intentionally different, "
+            "save it as a new request anyway\n"
+            "  'cancel'  — abandon this request without saving"
+        )
     )
     reasoning: str = Field(
         description="Brief explanation of why the user made this choice"
     )
 
 
-class ConversationState(TypedDict):
-    """State for the conversation workflow."""
+class ConversationState(TypedDict, total=False):
+    """State for the conversation workflow.
+
+    ``total=False`` makes every key optional so LangGraph can build
+    the state incrementally — keys are only present once a node sets
+    them.  Nodes must use ``.get()`` with sensible defaults rather
+    than direct key access.
+    """
 
     messages: Annotated[List[BaseMessage], operator.add]
     collected_data: Dict[str, Any]
@@ -53,24 +88,26 @@ class ConversationState(TypedDict):
     is_complete: bool
     duplicate_warning: List[Dict[str, Any]]
     config_version: str
-    update_existing: bool  # True if user wants to update existing request
-    existing_request_id: Optional[str]  # ID of request to update
-    awaiting_duplicate_decision: bool  # True when waiting for user to choose update/new
+    awaiting_duplicate_decision: bool
+    # 'modify' | 'proceed' | 'cancel' | None — set by
+    # handle_duplicate_decision_node so the router can branch cleanly
+    duplicate_decision: Optional[str]
 
 
 class ConversationWorkflow:
     """LangGraph workflow for conversational data collection."""
 
-    def __init__(self, mongodb_client: MongoDBClient) -> None:
+    def __init__(self, pg_client: PostgreSQLClient) -> None:
         """Initialize the workflow with database clients."""
-        self.mongodb_client = mongodb_client
+        self.pg_client = pg_client
         
         self.llm = get_llm()
         self.embedding_model = get_embedding_model()
         
         # Create structured LLMs once at initialization (performance optimization)
         self.llm_chat = self.llm.with_structured_output(ChatResponse)
-        self.llm_extract = self.llm.with_structured_output(RequestSchema)
+        self.llm_extract = self.llm.with_structured_output(ExtractedRequest)
+        self.llm_duplicate_judge = self.llm.with_structured_output(DuplicateJudgement)
         self.llm_duplicate_decision = self.llm.with_structured_output(DuplicateDecision)
         
         self.app = None
@@ -101,291 +138,427 @@ class ConversationWorkflow:
 
     async def extract_node(self, state: ConversationState) -> Dict[str, Any]:
         """
-        Extract structured data from conversation including ALL fields (business + PII).
-        
-        Only called when is_ready=True.
-        Uses RequestSchema (dynamically generated from config).
-        LLM extracts everything in one go - simple and straightforward.
+        Extract structured data from the conversation.
+
+        Uses ``ExtractedRequest`` — a schema-agnostic model with
+        only ``request_type`` fixed and everything else captured
+        in ``additional_data``.  This means prompt changes never
+        require a code or database migration; historical records
+        remain intact with whatever structure they were saved with.
         """
         logger.info("Extract node: Extracting structured data")
-        
+
         messages = state["messages"]
-        
-        # Add system prompt if needed
+
         if not any(isinstance(msg, SystemMessage) for msg in messages):
             messages = [SystemMessage(content=prompt_config.system_prompt)] + messages
-        
+
         try:
-            # Extract structured data (using pre-created structured LLM)
             extracted = self.llm_extract.invoke(messages)
-            data = schema_to_dict(extracted)
-            
-            logger.info(f"Successfully extracted data with {len(data)} fields")
-            
+            # Flatten into a single dict: request_type + everything else
+            data = extracted_to_dict(extracted)
+
+            logger.info(
+                f"Extracted data with {len(data)} field(s): "
+                f"{list(data.keys())}"
+            )
+
             return {
                 "collected_data": data,
-                "is_complete": True,  # Complete after extraction
+                "is_complete": True,
                 "config_version": prompt_config.config_version,
             }
-            
+
         except Exception as e:
             logger.error(f"Extraction failed: {e}")
-            
-            # Extraction failed - ask for clarification
-            error_msg = AIMessage(
-                content="I need some clarification on the information provided. "
-                       "Could you please provide more details?"
-            )
-            
+            # Keep is_ready=True so the next user message re-triggers
+            # extract_node — the conversation history still has all
+            # the data, no need to collect it again.
             return {
-                "messages": [error_msg],
-                "is_ready": False,
+                "messages": [AIMessage(
+                    content="⚠️ I had trouble reading your details. "
+                            "Please send any message and I'll try again."
+                )],
+                "is_ready": True,
                 "is_complete": False,
             }
 
     async def duplicate_check_node(self, state: ConversationState) -> Dict[str, Any]:
         """
-        Check for duplicate requests using two-stage detection:
-        1. Exact match on non-PII fields (fast, accurate)
-        2. Semantic similarity if no exact match and enabled (slower, fuzzy)
-        
-        Only checks text fields to preserve privacy (no PII in embeddings).
-        Returns duplicate warnings for human review.
+        Two-stage duplicate detection: fuzzy pre-filter → vector search.
+
+        Stage 1 — Fuzzy pre-filter (pg_trgm)
+            Match request_type and target_environment with trigram
+            similarity to build a candidate set. Catches typos /
+            minor variations without scanning the full table.
+            Returns only row IDs (no PII).
+
+        Stage 2 — Vector search on candidates only
+            Run cosine similarity exclusively against the candidate
+            IDs from Stage 1, so unrelated request types are never
+            compared. If the candidate set is empty, Stage 2 is
+            skipped entirely — no duplicates are possible.
+
+        Stage 3 — LLM semantic judge
+            For each candidate that passed the vector threshold, ask
+            the LLM whether it is a *true* duplicate of the new request
+            by comparing non-PII fields side-by-side.  This eliminates
+            false positives where vector similarity is high but a
+            meaningful field differs (e.g. development vs production).
+            Only records the LLM confirms as duplicates reach the user.
         """
         if not settings.duplicate_detection_enabled:
             logger.info("Duplicate detection disabled")
             return {}
-        
-        logger.info("Duplicate check node: Checking for duplicate requests")
-        
-        collected_data = state["collected_data"]
-        
-        # STAGE 1: Try exact match first (fast, no embeddings needed)
-        logger.info("Stage 1: Checking for exact match duplicates...")
-        exact_matches = await find_exact_match_duplicates(
-            mongodb_client=self.mongodb_client,
-            data=collected_data,
-            lookback_days=settings.lookback_days,
+
+        collected_data = state.get("collected_data")
+        if not collected_data:
+            logger.warning(
+                "duplicate_check_node: no collected_data in state"
+            )
+            return {}
+
+        logger.info(
+            "Duplicate check: starting fuzzy → vector pipeline"
         )
-        
-        if exact_matches:
-            logger.info(f"Found {len(exact_matches)} exact match duplicate(s)")
-            similar = exact_matches
-        else:
-            # STAGE 2: No exact match, try semantic similarity if enabled
-            if settings.semantic_search_enabled:
-                logger.info("Stage 2: No exact matches, checking semantic similarity...")
-                
-                # Extract text fields for embedding
-                text_fields = get_text_fields()
-                text_content = " ".join([
-                    str(collected_data.get(field, ""))
-                    for field in text_fields
-                ])
-                
-                if not text_content.strip():
-                    logger.warning("No text content for embedding")
-                    return {}
-                
-                # Generate embedding
-                embedding_result = await self.embedding_model.aembed_query(text_content)
-                
-                # Find similar requests
-                similar = await find_similar_requests(
-                    mongodb_client=self.mongodb_client,
-                    embedding=embedding_result,
-                    threshold=settings.similarity_threshold,
-                    lookback_days=settings.lookback_days,
+
+        request_type = collected_data.get("request_type", "")
+
+        # STAGE 1: fuzzy pre-filter — build candidate set
+        logger.info(
+            "Stage 1: fuzzy pre-filter on "
+            "request_type + target_environment..."
+        )
+        candidate_ids = await find_fuzzy_candidates(
+            pg_client=self.pg_client,
+            request_type=request_type,
+            lookback_days=settings.lookback_days,
+            fuzzy_threshold=settings.fuzzy_threshold,
+            limit=settings.candidate_limit,
+        )
+
+        if not candidate_ids:
+            logger.info(
+                "Stage 1: no fuzzy candidates — "
+                "skipping vector search"
+            )
+            return {}
+
+        similar: List[Dict[str, Any]] = []
+
+        # STAGE 2: vector search scoped to candidates
+        if settings.semantic_search_enabled:
+            logger.info(
+                f"Stage 2: vector search over "
+                f"{len(candidate_ids)} candidate(s)..."
+            )
+
+            text_content = " ".join(
+                str(collected_data[f])
+                for f in get_text_fields(collected_data)
+            )
+
+            if not text_content.strip():
+                logger.warning("No text content for embedding")
+                return {}
+
+            embedding_result = (
+                await self.embedding_model.aembed_query(
+                    text_content
                 )
-            else:
-                logger.info("Stage 2: Semantic search disabled, skipping")
-                similar = []
-        
+            )
+
+            similar = await find_similar_requests(
+                pg_client=self.pg_client,
+                embedding=embedding_result,
+                candidate_ids=candidate_ids,
+                threshold=settings.similarity_threshold,
+            )
+        else:
+            logger.info(
+                "Stage 2: semantic search disabled, skipping"
+            )
+
+        if not similar:
+            logger.info("No duplicates found")
+            return {}
+
+        # STAGE 3: LLM semantic judge — filter out false positives
+        # Only non-PII fields are sent; no privacy concern.
+        logger.info(
+            f"Stage 3: LLM judge evaluating "
+            f"{len(similar)} vector candidate(s)..."
+        )
+        pii_fields = set(prompt_config.privacy.get("pii_fields", []))
+        new_non_pii = {
+            k: v for k, v in collected_data.items()
+            if k not in pii_fields
+        }
+
+        confirmed: List[Dict[str, Any]] = []
+        for req in similar:
+            candidate_non_pii = {
+                k: v
+                for k, v in req.get("data", {}).items()
+                if k not in pii_fields
+            }
+            judge_prompt = [
+                SystemMessage(content=(
+                    "You are a duplicate-request detector. "
+                    "Compare the two requests below and decide if they "
+                    "represent the same intent — same purpose, same "
+                    "target, same scope. "
+                    "If any meaningful field differs (e.g. different "
+                    "environment, system, date, or access level) they "
+                    "are NOT duplicates."
+                )),
+                AIMessage(content=(
+                    f"NEW REQUEST:\n{new_non_pii}\n\n"
+                    f"EXISTING REQUEST:\n{candidate_non_pii}"
+                )),
+            ]
+            try:
+                verdict = await self.llm_duplicate_judge.ainvoke(
+                    judge_prompt
+                )
+                logger.info(
+                    f"Judge verdict for {req.get('_id')}: "
+                    f"is_duplicate={verdict.is_duplicate} — "
+                    f"{verdict.reasoning}"
+                )
+                if verdict.is_duplicate:
+                    confirmed.append(req)
+            except Exception as e:
+                logger.warning(
+                    f"Judge failed for {req.get('_id')}: {e} — "
+                    "treating as non-duplicate to avoid false positive"
+                )
+
+        similar = confirmed
+
         if similar:
-            match_type = "exact match" if exact_matches else "similar"
-            logger.info(f"Found {len(similar)} {match_type} request(s)")
-            
-            # Format duplicate warning (without PII)
+            logger.info(
+                f"Stage 3: {len(similar)} confirmed duplicate(s) "
+                f"after LLM judgement"
+            )
+
             warnings = []
             for req in similar:
+                non_pii_data = {
+                    k: v
+                    for k, v in req.get("data", {}).items()
+                    if k not in pii_fields
+                }
                 warnings.append({
                     "id": str(req.get("_id")),
-                    "similarity_score": req.get("similarity_score", 0),
-                    "is_exact_match": req.get("is_exact_match", False),
+                    "similarity_score": req.get(
+                        "similarity_score", 0
+                    ),
                     "created_at": str(req.get("created_at")),
                     "config_version": req.get("config_version"),
-                    # Only include non-PII fields
-                    "request_type": req.get("data", {}).get("request_type"),
-                    "target_environment": req.get("data", {}).get("target_environment"),
+                    "data": non_pii_data,
                 })
-            
-            # Add message about duplicates
-            match_description = "exact duplicate(s)" if exact_matches else "similar request(s)"
+
             duplicate_msg = AIMessage(
-                content=f"⚠️ I found {len(similar)} {match_description} that may be duplicates:\n\n"
-                       f"Would you like to:\n"
-                       f"1. Update the existing request\n"
-                       f"2. Create a new request anyway\n\n"
-                       f"Please respond with 'update' or 'new'."
+                content=(
+                    f"⚠️ I found {len(similar)} request(s) that "
+                    f"look similar to yours.\n\n"
+                    f"This is not an exact match — it just means "
+                    f"something close was submitted before. "
+                    f"If your request is genuinely different "
+                    f"(e.g. a different environment, system, or "
+                    f"date), that's fine — just choose **proceed**.\n\n"
+                    f"What would you like to do?\n"
+                    f"• **proceed** — yes, my request is different, "
+                    f"save it\n"
+                    f"• **modify** — let me change something first\n"
+                    f"• **cancel** — abandon this request\n\n"
+                    f"Reply with 'proceed', 'modify', or 'cancel'."
+                )
             )
-            
+
             return {
                 "duplicate_warning": warnings,
                 "messages": [duplicate_msg],
-                "awaiting_duplicate_decision": True,  # Set flag to wait for decision
-                "is_complete": False,  # Keep session open for user decision
+                "awaiting_duplicate_decision": True,
+                "is_complete": False,
             }
-        
-        logger.info("No duplicates found (exact or semantic)")
+
+        logger.info("Stage 3: all candidates cleared by LLM judge — no duplicates")
         return {}
 
     async def handle_duplicate_decision_node(self, state: ConversationState) -> Dict[str, Any]:
         """
-        Handle user's decision on duplicate: update existing or create new.
-        
-        Uses LLM with structured output for robust parsing.
+        Handle user's decision when a duplicate is detected.
+
+        Three valid choices:
+        - 'modify'  — reset collected data, clear duplicate state, and
+                      return to the chat node so the user can tell the
+                      bot what they want to change.  The conversation
+                      history is preserved so context is not lost.
+        - 'proceed' — the request is intentionally different; save it
+                      as a brand-new record.
+        - 'cancel'  — abandon without saving; end the conversation.
+
+        The old/existing duplicate record is never modified.
+        ``duplicate_decision`` is written to state so the router
+        ``after_duplicate_decision`` can branch without re-reading the
+        LLM output.
         """
-        logger.info("Handle duplicate decision node: Processing user choice")
-        
-        # Create prompt for LLM to parse user's decision
-        system_prompt = SystemMessage(
-            content="You are parsing a user's decision about duplicate requests. "
-                   "The user should respond with 'update' to update an existing request "
-                   "or 'new' to create a new request. Extract their choice."
+        logger.info(
+            "Handle duplicate decision: parsing user choice"
         )
-        
-        messages = [system_prompt] + state["messages"]
-        
+
+        system_prompt = SystemMessage(
+            content=(
+                "You are parsing a user's response to a duplicate "
+                "request warning.  The user should choose one of:\n"
+                "  'modify'  — they want to go back to the "
+                "conversation and change something in their current "
+                "request\n"
+                "  'proceed' — their request is intentionally "
+                "different and should be saved as a new record\n"
+                "  'cancel'  — they want to abandon the request "
+                "without saving\n"
+                "Extract their choice."
+            )
+        )
+
+        messages = [system_prompt] + state.get("messages", [])
+
         try:
-            # Use structured LLM to parse decision
-            result = await self.llm_duplicate_decision.ainvoke(messages)
-            
+            result = await self.llm_duplicate_decision.ainvoke(
+                messages
+            )
             choice = result.choice.lower().strip()
             logger.info(f"Parsed duplicate decision: {choice}")
-            
-            if choice == "update":
-                # User wants to update existing request
-                logger.info("User chose to update existing request")
-                
-                # Get the first duplicate's ID (we'll update the most similar one)
-                duplicate_warning = state.get("duplicate_warning", [])
-                if duplicate_warning:
-                    existing_id = duplicate_warning[0]["id"]
-                    logger.info(f"Will update request ID: {existing_id}")
-                    
-                    return {
-                        "update_existing": True,
-                        "existing_request_id": existing_id,
-                        "awaiting_duplicate_decision": False,
-                        "messages": [AIMessage(
-                            content=f"✅ I'll update your existing request with the new information.\n"
-                                   f"Reason: {result.reasoning}"
-                        )]
-                    }
-                else:
-                    logger.error("No duplicate warning found in state")
-                    return {
-                        "update_existing": False,
-                        "awaiting_duplicate_decision": False,
-                        "messages": [AIMessage(
-                            content="❌ Error: Could not find the duplicate request. Creating a new request instead."
-                        )]
-                    }
-            
-            elif choice == "new":
-                # User wants to create new request
-                logger.info("User chose to create new request")
-                
+
+            if choice == "modify":
+                # Clear extraction state so the user can refine their
+                # request from scratch in the chat node.  Conversation
+                # history is kept so the bot has context.
+                logger.info(
+                    "User chose to modify — returning to chat"
+                )
                 return {
-                    "update_existing": False,
+                    "collected_data": {},
+                    "is_ready": False,
+                    "is_complete": False,
+                    "duplicate_warning": [],
                     "awaiting_duplicate_decision": False,
+                    "duplicate_decision": "modify",
                     "messages": [AIMessage(
-                        content=f"✅ I'll create a new request for you.\n"
-                               f"Reason: {result.reasoning}"
-                    )]
+                        content=(
+                            "Sure! What would you like to change "
+                            "about your request? Let me know and "
+                            "I'll update it for you."
+                        )
+                    )],
                 }
-            
-            else:
-                # Invalid choice from LLM
-                logger.warning(f"LLM returned invalid choice: {choice}")
+
+            elif choice == "proceed":
+                # Save the current request as a new record
+                logger.info(
+                    "User chose to proceed — saving as new request"
+                )
                 return {
+                    "awaiting_duplicate_decision": False,
+                    "duplicate_warning": [],
+                    "duplicate_decision": "proceed",
                     "messages": [AIMessage(
-                        content="❌ I couldn't understand your choice. Please respond with 'update' or 'new'."
-                    )]
+                        content=(
+                            "✅ Got it — saving your request now."
+                        )
+                    )],
                 }
-        
+
+            elif choice == "cancel":
+                # End the conversation without saving anything
+                logger.info(
+                    "User chose to cancel — ending conversation"
+                )
+                return {
+                    "awaiting_duplicate_decision": False,
+                    "is_complete": False,
+                    "duplicate_decision": "cancel",
+                    "messages": [AIMessage(
+                        content=(
+                            "Your request has been cancelled. "
+                            "Feel free to start a new request "
+                            "whenever you're ready."
+                        )
+                    )],
+                }
+
+            else:
+                logger.warning(
+                    f"LLM returned unrecognised choice: {choice}"
+                )
+                return {
+                    "duplicate_decision": None,
+                    "messages": [AIMessage(
+                        content=(
+                            "❌ I didn't quite catch that. "
+                            "Please reply with 'modify', "
+                            "'proceed', or 'cancel'."
+                        )
+                    )],
+                }
+
         except Exception as e:
             logger.error(f"Error parsing duplicate decision: {e}")
             return {
+                "duplicate_decision": None,
                 "messages": [AIMessage(
-                    content="❌ Error processing your choice. Please respond with 'update' or 'new'."
-                )]
+                    content=(
+                        "❌ Something went wrong. Please reply "
+                        "with 'modify', 'proceed', or 'cancel'."
+                    )
+                )],
             }
 
     async def save_node(self, state: ConversationState) -> Dict[str, Any]:
         """
-        Save or update the collected data in MongoDB.
-        
-        All data (including PII) is already in collected_data from extract_node.
-        If update_existing=True, updates the existing request.
-        Otherwise, creates a new request.
+        Save the collected data as a new request in PostgreSQL.
+
+        All data (including PII) is already in collected_data from
+        extract_node.  Always creates a new record — updating an
+        existing duplicate is not supported; that path was removed
+        in favour of the modify → chat loop.
         """
-        collected_data = state["collected_data"].copy()  # Make a copy to avoid mutating state
-        update_existing = state.get("update_existing", False)
-        existing_request_id = state.get("existing_request_id")
-        
-        # Generate embedding for future duplicate detection (excluding PII)
-        text_fields = get_text_fields()
-        text_content = " ".join([
-            str(collected_data.get(field, ""))
-            for field in text_fields
-        ])
-        
+        collected_data = state.get("collected_data")
+        if not collected_data:
+            logger.error("save_node: collected_data missing from state")
+            return {
+                "messages": [AIMessage(
+                    content="⚠️ I had trouble processing your "
+                            "request details. Let me try again — "
+                            "please send any message to continue."
+                )],
+                "is_complete": False,
+                "is_ready": True,
+            }
+        collected_data = collected_data.copy()
+
+        # Generate embedding for semantic duplicate detection (non-PII only)
+        text_content = " ".join(
+            str(collected_data[f])
+            for f in get_text_fields(collected_data)
+        )
+
         embedding = await self.embedding_model.aembed_query(text_content)
-        
-        if update_existing and existing_request_id:
-            # Update existing request
-            logger.info(f"Save node: Updating existing request {existing_request_id}")
-            
-            success = await update_request(
-                self.mongodb_client, existing_request_id, collected_data, embedding
-            )
-            
-            if success:
-                success_msg = AIMessage(
-                    content=f"✅ Your existing request has been successfully updated!\n"
-                           f"Request ID: {existing_request_id}\n\n"
-                           f"Thank you!"
-                )
-            else:
-                success_msg = AIMessage(
-                    content="❌ Failed to update the existing request. "
-                           "Creating a new request instead..."
-                )
-                # Fallback to creating new request
-                request_id = await save_request(self.mongodb_client, collected_data, embedding)
-                success_msg = AIMessage(
-                    content=f"✅ New request created successfully!\n"
-                           f"Request ID: {request_id}\n\n"
-                           f"Thank you!"
-                )
-        else:
-            # Create new request
-            logger.info("Save node: Creating new request")
-            
-            request_id = await save_request(self.mongodb_client, collected_data, embedding)
-            
-            logger.info(f"Request saved with ID: {request_id}")
-            
-            success_msg = AIMessage(
-                content=f"✅ Your request has been successfully submitted!\n"
-                       f"Request ID: {request_id}\n\n"
-                       f"Thank you!"
-            )
-        
+
+        logger.info("Save node: Creating new request")
+        request_id = await save_request(self.pg_client, collected_data, embedding)
+        logger.info(f"Request saved with ID: {request_id}")
+
         return {
-            "messages": [success_msg],
-            "is_complete": True  # Mark conversation as complete after successful save
+            "messages": [AIMessage(
+                content=f"✅ Your request has been successfully submitted!\n"
+                        f"Request ID: {request_id}\n\n"
+                        f"Thank you!"
+            )],
+            "is_complete": True,
         }
 
     def should_extract(self, state: ConversationState) -> str:
@@ -396,30 +569,45 @@ class ConversationWorkflow:
 
     def should_save(self, state: ConversationState) -> str:
         """
-        Routing: Determine if we should save immediately or wait for user decision.
-        
-        If duplicates found and awaiting decision, END and wait.
-        If decision made (awaiting_duplicate_decision=False), proceed to save.
-        If no duplicates, proceed to save.
+        Routing: Determine if we should save or end the turn.
+
+        Guards:
+        - No collected_data → extraction failed; END so the chat
+          node can ask the user to clarify (is_ready is already
+          False from extract_node's error path).
+        - Duplicates found and awaiting decision → END and wait
+          for the user to reply with 'update' or 'new'.
+        - Otherwise → proceed to save.
         """
-        if state.get("duplicate_warning") and state.get("awaiting_duplicate_decision"):
-            # Duplicates found and waiting for user decision
+        if not state.get("collected_data"):
+            # Extraction failed — user already got an error message
+            # from extract_node; just end this turn.
+            logger.warning(
+                "should_save: no collected_data — "
+                "skipping save, waiting for user clarification"
+            )
             return END
-        # No duplicates or decision already made - proceed to save
+        if state.get("duplicate_warning") and state.get("awaiting_duplicate_decision"):
+            return END
         return "save"
     
     def after_duplicate_decision(self, state: ConversationState) -> str:
         """
         Routing after duplicate decision is made.
-        
-        If decision was invalid (still awaiting), END and wait for retry.
-        Otherwise, proceed to save.
+
+        - ``modify``  → route back to ``chat`` so the user can refine
+                        their current request through conversation.
+        - ``proceed`` → route to ``save`` to persist as a new record.
+        - ``cancel``  → END the conversation without saving.
+        - ``None``    → unrecognised reply; END and wait for a retry.
         """
-        if state.get("awaiting_duplicate_decision"):
-            # Invalid decision, still waiting
-            return END
-        # Valid decision made, proceed to save
-        return "save"
+        decision = state.get("duplicate_decision")
+        if decision == "modify":
+            return "chat"
+        if decision == "proceed":
+            return "save"
+        # 'cancel' or unrecognised (None) — end the turn
+        return END
 
     def route_entry(self, state: ConversationState) -> str:
         """
@@ -437,29 +625,32 @@ class ConversationWorkflow:
     def build_graph(self) -> StateGraph:
         """
         Build the LangGraph workflow.
-        
-        Simplified flow:
-        1. chat -> Continue conversation (structured output with is_ready flag)
-        2. extract -> Extract ALL data including PII when ready
-        3. duplicate_check -> Find similar requests
-        4. handle_duplicate_decision -> Parse user's choice (update/new)
-        5. save -> Persist to MongoDB (create new or update existing)
-        
+
+        Flow:
+        1. chat             — collect details through conversation
+        2. extract          — structure the conversation into data fields
+        3. duplicate_check  — two-stage fuzzy → vector similarity search
+        4. handle_duplicate_decision — parse user's choice
+        5. save / chat / END — branch on decision
+
         Human intervention points:
-        - After each chat message (API returns, waits for next user input)
-        - After duplicate_check (if duplicates found, user must choose update/new)
-        - After handle_duplicate_decision (if invalid choice, wait for retry)
+        - After every chat turn (API returns; waits for next user input)
+        - After duplicate_check finds matches (user must reply)
+        - After handle_duplicate_decision if reply is unrecognised or
+          'cancel' (END without saving)
+        - After 'modify': returns to chat so user can refine their request
         """
         workflow = StateGraph(ConversationState)
-        
+
         # Add nodes
         workflow.add_node("chat", self.chat_node)
         workflow.add_node("extract", self.extract_node)
         workflow.add_node("duplicate_check", self.duplicate_check_node)
         workflow.add_node("handle_duplicate_decision", self.handle_duplicate_decision_node)
         workflow.add_node("save", self.save_node)
-        
-        # Set entry point with conditional routing
+
+        # Entry point: route to duplicate-decision handler if we are
+        # waiting for a reply, otherwise start fresh in chat.
         workflow.set_conditional_entry_point(
             self.route_entry,
             {
@@ -467,43 +658,44 @@ class ConversationWorkflow:
                 "handle_duplicate_decision": "handle_duplicate_decision",
             }
         )
-        
-        # Routing from chat
+
+        # chat → extract (when ready) or END (wait for next message)
         workflow.add_conditional_edges(
             "chat",
             self.should_extract,
             {
                 "extract": "extract",
-                END: END,  # Wait for next user message
+                END: END,
             }
         )
-        
-        # Routing from extract -> duplicate_check
+
+        # extract always feeds into duplicate_check
         workflow.add_edge("extract", "duplicate_check")
-        
-        # Routing from duplicate_check
+
+        # duplicate_check → save (no duplicates) or END (await decision)
         workflow.add_conditional_edges(
             "duplicate_check",
             self.should_save,
             {
-                "save": "save",  # No duplicates, proceed to save
-                END: END,  # Duplicates found, wait for user decision
+                "save": "save",
+                END: END,
             }
         )
-        
-        # Routing from handle_duplicate_decision
+
+        # handle_duplicate_decision → chat (modify) / save (proceed) / END
         workflow.add_conditional_edges(
             "handle_duplicate_decision",
             self.after_duplicate_decision,
             {
-                "save": "save",  # Valid decision made, proceed to save
-                END: END,  # Invalid decision, wait for retry
+                "chat": "chat",   # modify: back to conversation
+                "save": "save",   # proceed: persist as new record
+                END: END,         # cancel or unrecognised: end turn
             }
         )
-        
-        # After save, end
+
+        # save always ends the turn
         workflow.add_edge("save", END)
-        
+
         return workflow
 
     def compile(self, checkpointer: BaseCheckpointSaver):

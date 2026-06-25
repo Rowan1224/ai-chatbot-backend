@@ -1,119 +1,137 @@
-"""Dynamic Pydantic schema generation from YAML configuration."""
+"""Schema for LLM extraction — schema-agnostic by design.
 
-from enum import Enum
-from typing import Any, Dict, List, Type
+Three fields are always guaranteed regardless of the active prompt:
+- ``request_type`` — stable anchor for fuzzy matching and routing
+- ``name``         — requester's full name (PII, never embedded)
+- ``employee_id``  — requester's employee ID (PII, never embedded)
 
-from pydantic import BaseModel, Field, create_model
+Everything else the LLM extracts lands in ``additional_data`` as
+a free-form dict, so changing the prompt YAML never requires a
+code or database migration.
+
+Historical records are preserved as-is: their ``data`` JSONB blob
+reflects whatever schema was active when they were submitted.
+"""
+
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field
 
 from src.config.settings import prompt_config
 
 
-def generate_request_schema() -> Type[BaseModel]:
+class DataField(BaseModel):
+    """A single key-value pair extracted from the conversation.
+
+    OpenAI structured output requires ``additionalProperties: false``
+    on every object — a free-form dict is not allowed.  Encoding
+    variable fields as a typed list of key/value pairs satisfies the
+    schema constraint while still letting the LLM return any fields
+    the active prompt defines.
     """
-    Generate Pydantic model dynamically from prompt configuration.
-    
-    This allows the schema to change based on the YAML config without code changes.
-    The generated model is used for OpenAI structured output.
-    
-    Returns:
-        Dynamically created Pydantic model class
+
+    key: str = Field(description="Field name (e.g. 'target_environment')")
+    value: str = Field(description="Field value as a string")
+
+
+class ExtractedRequest(BaseModel):
     """
-    fields: Dict[str, Any] = {}
-    
-    for field_config in prompt_config.fields:
-        field_name = field_config["name"]
-        field_type = field_config["type"]
-        field_desc = field_config.get("description", "")
-        is_required = field_config.get("required", True)
-        
-        # Determine Python type based on config
-        if field_type == "enum":
-            # Create enum dynamically
-            options = field_config.get("options", [])
-            enum_name = f"{field_name.title().replace('_', '')}Enum"
-            enum_class = Enum(enum_name, {opt: opt for opt in options})
-            python_type = enum_class
-        
-        elif field_type == "string" or field_type == "text":
-            python_type = str
-        
-        elif field_type == "integer" or field_type == "int":
-            python_type = int
-        
-        elif field_type == "number" or field_type == "float":
-            python_type = float
-        
-        elif field_type == "boolean" or field_type == "bool":
-            python_type = bool
-        
-        else:
-            # Default to string for unknown types
-            python_type = str
-        
-        # Create field with description
-        if is_required:
-            fields[field_name] = (python_type, Field(..., description=field_desc))
-        else:
-            fields[field_name] = (python_type, Field(default=None, description=field_desc))
-    
-    # Create the model dynamically
-    RequestModel = create_model(
-        "DynamicRequest",
-        __doc__=f"Request schema for config version {prompt_config.config_version}",
-        **fields
+    Structured output from the LLM extraction step.
+
+    Fixed platform fields (always present):
+    - ``request_type``: stable anchor for fuzzy search & routing
+    - ``name``: requester full name — collected by every prompt
+    - ``employee_id``: requester employee ID — collected by every prompt
+
+    Variable prompt fields:
+    - ``additional_data``: list of key/value pairs for everything
+      else the active prompt asks for.  Keys and values are driven
+      by the system prompt, not by this class definition.
+    """
+
+    request_type: str = Field(
+        description=(
+            "The type/category of the request. "
+            "Normalise to the closest known value as guided "
+            "by the system prompt."
+        )
     )
-    
-    return RequestModel
+    name: str = Field(
+        description="Requester's full name."
+    )
+    employee_id: str = Field(
+        description="Requester's employee ID (e.g. EMP12345)."
+    )
+    additional_data: List[DataField] = Field(
+        default_factory=list,
+        description=(
+            "All other information collected during the "
+            "conversation (e.g. justification, environment, "
+            "priority), encoded as key/value pairs. "
+            "Include one entry per additional field."
+        ),
+    )
 
 
-def get_text_fields() -> List[str]:
+def extracted_to_dict(extracted: ExtractedRequest) -> Dict[str, Any]:
     """
-    Get list of text fields for embedding generation (excluding PII).
-    
-    Only text/string fields are used for semantic similarity.
-    PII fields (name, employee_id) are excluded for privacy.
-    
-    Returns:
-        List of field names that contain text (non-PII only)
-    """
-    # Get PII fields from config
-    pii_fields = prompt_config.privacy.get("pii_fields", ["name", "employee_id"])
-    
-    text_fields = []
-    for field_config in prompt_config.fields:
-        field_name = field_config["name"]
-        field_type = field_config["type"]
-        
-        # Include only text fields that are not PII
-        if field_type in ["string", "text", "enum"] and field_name not in pii_fields:
-            text_fields.append(field_name)
-    
-    return text_fields
+    Flatten ``ExtractedRequest`` into a single dict for storage.
 
+    Fixed fields (``request_type``, ``name``, ``employee_id``) are
+    always present at the top level.  Fields from ``additional_data``
+    are merged in at the same level so the stored structure matches
+    what the active prompt defined, regardless of schema version.
 
-def schema_to_dict(model_instance: BaseModel) -> Dict[str, Any]:
+    Example:
+        ExtractedRequest(
+            request_type="infrastructure-provisioning",
+            name="Jane",
+            employee_id="EMP99",
+            additional_data=[
+                DataField(key="target_environment", value="production"),
+                DataField(key="business_justification", value="..."),
+            ]
+        )
+        → {
+            "request_type": "infrastructure-provisioning",
+            "name": "Jane",
+            "employee_id": "EMP99",
+            "target_environment": "production",
+            "business_justification": "...",
+          }
     """
-    Convert Pydantic model instance to dictionary.
-    
-    Handles enum values properly (converts to string).
-    
-    Args:
-        model_instance: Pydantic model instance
-        
-    Returns:
-        Dictionary representation
-    """
-    data = model_instance.model_dump()
-    
-    # Convert enum values to strings
-    for key, value in data.items():
-        if isinstance(value, Enum):
-            data[key] = value.value
-    
+    data: Dict[str, Any] = {
+        "request_type": extracted.request_type,
+        "name": extracted.name,
+        "employee_id": extracted.employee_id,
+    }
+    for field in extracted.additional_data:
+        data[field.key] = field.value
     return data
 
 
-# Generate the schema at module load time
-RequestSchema = generate_request_schema()
+def get_text_fields(data: Dict[str, Any]) -> List[str]:
+    """
+    Return the non-PII text field names present in ``data``.
+
+    Works from the *actual extracted data keys* rather than a
+    static YAML field list, so it stays correct across schema
+    versions without any code change.
+
+    Args:
+        data: The flat request dict (output of extracted_to_dict)
+
+    Returns:
+        List of key names whose values are non-empty strings
+        and are not in the configured PII field list.
+    """
+    pii_fields = set(
+        prompt_config.privacy.get("pii_fields", [])
+    )
+    return [
+        k for k, v in data.items()
+        if k not in pii_fields and isinstance(v, str) and v.strip()
+    ]
+
 
 # Made with Bob

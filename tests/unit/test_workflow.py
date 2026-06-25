@@ -9,6 +9,7 @@ from src.core.workflow import (
     ConversationWorkflow,
     ConversationState,
     ChatResponse,
+    DuplicateJudgement,
     DuplicateDecision,
 )
 
@@ -19,16 +20,17 @@ class TestConversationWorkflow:
     @pytest.fixture
     def workflow(self):
         """Create workflow instance with mocked clients."""
-        mongodb_client = MagicMock()
-        return ConversationWorkflow(mongodb_client)
-    
+        pg_client = MagicMock()
+        return ConversationWorkflow(pg_client)
+
     def test_init(self, workflow):
         """Test workflow initialization."""
-        assert workflow.mongodb_client is not None
+        assert workflow.pg_client is not None
         assert workflow.llm is not None
         assert workflow.embedding_model is not None
         assert workflow.llm_chat is not None
         assert workflow.llm_extract is not None
+        assert workflow.llm_duplicate_judge is not None
         assert workflow.llm_duplicate_decision is not None
 
 
@@ -76,10 +78,11 @@ class TestRoutingLogic:
     def test_should_save_no_duplicates(self, workflow):
         """Test should_save when no duplicates."""
         state = {
+            "collected_data": {"request_type": "infra"},
             "duplicate_warning": [],
             "awaiting_duplicate_decision": False,
         }
-        
+
         route = workflow.should_save(state)
         assert route == "save"
     
@@ -96,26 +99,33 @@ class TestRoutingLogic:
     def test_should_save_duplicates_decision_made(self, workflow):
         """Test should_save when duplicates found but decision made."""
         state = {
+            "collected_data": {"request_type": "infra"},
             "duplicate_warning": [{"id": "123"}],
             "awaiting_duplicate_decision": False,
         }
-        
+
         route = workflow.should_save(state)
         assert route == "save"
     
-    def test_after_duplicate_decision_valid(self, workflow):
-        """Test after_duplicate_decision when decision is valid."""
-        state = {"awaiting_duplicate_decision": False}
-        
-        route = workflow.after_duplicate_decision(state)
-        assert route == "save"
-    
-    def test_after_duplicate_decision_invalid(self, workflow):
-        """Test after_duplicate_decision when decision is invalid."""
-        state = {"awaiting_duplicate_decision": True}
-        
-        route = workflow.after_duplicate_decision(state)
-        assert route == "__end__"
+    def test_after_duplicate_decision_modify(self, workflow):
+        """Test after_duplicate_decision routes to chat on modify."""
+        state = {"duplicate_decision": "modify"}
+        assert workflow.after_duplicate_decision(state) == "chat"
+
+    def test_after_duplicate_decision_proceed(self, workflow):
+        """Test after_duplicate_decision routes to save on proceed."""
+        state = {"duplicate_decision": "proceed"}
+        assert workflow.after_duplicate_decision(state) == "save"
+
+    def test_after_duplicate_decision_cancel(self, workflow):
+        """Test after_duplicate_decision ends conversation on cancel."""
+        state = {"duplicate_decision": "cancel"}
+        assert workflow.after_duplicate_decision(state) == "__end__"
+
+    def test_after_duplicate_decision_unrecognised(self, workflow):
+        """Test after_duplicate_decision ends turn on unrecognised reply."""
+        state = {"duplicate_decision": None}
+        assert workflow.after_duplicate_decision(state) == "__end__"
 
 
 class TestChatResponse:
@@ -137,23 +147,64 @@ class TestChatResponse:
             ChatResponse(response="Test")  # Missing is_ready
 
 
+class TestDuplicateJudgement:
+    """Test DuplicateJudgement model."""
+
+    def test_is_duplicate_true(self):
+        """Test judgement when requests are duplicates."""
+        judgement = DuplicateJudgement(
+            is_duplicate=True,
+            reasoning="Both requests are for infrastructure provisioning in production."
+        )
+        assert judgement.is_duplicate is True
+        assert judgement.reasoning != ""
+
+    def test_is_duplicate_false(self):
+        """Test judgement when requests differ meaningfully."""
+        judgement = DuplicateJudgement(
+            is_duplicate=False,
+            reasoning="New request targets production; existing targets development."
+        )
+        assert judgement.is_duplicate is False
+
+    def test_duplicate_judgement_validation(self):
+        """Test DuplicateJudgement requires both fields."""
+        with pytest.raises(Exception):
+            DuplicateJudgement(is_duplicate=True)  # Missing reasoning
+
+
 class TestDuplicateDecision:
     """Test DuplicateDecision model."""
-    
-    def test_duplicate_decision_creation(self):
-        """Test creating DuplicateDecision."""
+
+    def test_duplicate_decision_modify(self):
+        """Test creating DuplicateDecision with modify choice."""
         decision = DuplicateDecision(
-            choice="update",
-            reasoning="User wants to update existing request"
+            choice="modify",
+            reasoning="User wants to change their request"
         )
-        
-        assert decision.choice == "update"
-        assert decision.reasoning == "User wants to update existing request"
-    
+        assert decision.choice == "modify"
+        assert decision.reasoning == "User wants to change their request"
+
+    def test_duplicate_decision_proceed(self):
+        """Test creating DuplicateDecision with proceed choice."""
+        decision = DuplicateDecision(
+            choice="proceed",
+            reasoning="Request is intentionally different"
+        )
+        assert decision.choice == "proceed"
+
+    def test_duplicate_decision_cancel(self):
+        """Test creating DuplicateDecision with cancel choice."""
+        decision = DuplicateDecision(
+            choice="cancel",
+            reasoning="User wants to abandon the request"
+        )
+        assert decision.choice == "cancel"
+
     def test_duplicate_decision_validation(self):
         """Test DuplicateDecision validation."""
         with pytest.raises(Exception):  # Pydantic validation error
-            DuplicateDecision(choice="update")  # Missing reasoning
+            DuplicateDecision(choice="modify")  # Missing reasoning
 
 
 class TestBuildGraph:

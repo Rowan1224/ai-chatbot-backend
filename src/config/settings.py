@@ -1,6 +1,6 @@
 """Application settings and configuration loader."""
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import yaml
 from pydantic import Field, model_validator
@@ -46,9 +46,10 @@ class Settings(BaseSettings):
     langsmith_api_key: Optional[str] = Field(default=None, description="LangSmith API key")
     langsmith_project: str = Field(default="default", description="LangSmith project name")
 
-    # MongoDB Configuration
-    mongodb_url: str = Field(..., description="MongoDB connection URL")
-    mongodb_db_name: str = Field(default="chatbot", description="MongoDB database name")
+    # PostgreSQL Configuration
+    postgresql_url: str = Field(
+        ..., description="PostgreSQL connection URL"
+    )
 
     # Redis Configuration
     redis_url: str = Field(default="redis://localhost:6379", description="Redis connection URL")
@@ -73,7 +74,8 @@ class Settings(BaseSettings):
 
     # Vector Search Configuration
     vector_search_provider: str = Field(
-        default="atlas", description="Vector search provider (atlas, local, pgvector)"
+        default="pgvector",
+        description="Vector search provider (pgvector, local)",
     )
 
     # Duplicate Detection
@@ -81,13 +83,34 @@ class Settings(BaseSettings):
         default=True, description="Enable duplicate detection"
     )
     semantic_search_enabled: bool = Field(
-        default=True, description="Enable semantic similarity search (requires embeddings)"
+        default=True,
+        description=(
+            "Enable semantic similarity search "
+            "(requires embeddings)"
+        ),
     )
     similarity_threshold: float = Field(
-        default=0.85, description="Similarity threshold for duplicate detection"
+        default=0.85,
+        description="Cosine similarity threshold (0–1)",
     )
     lookback_days: int = Field(
-        default=30, description="Number of days to look back for duplicates"
+        default=90,
+        description="Days to look back for duplicates",
+    )
+    # Fuzzy pre-filter (pg_trgm) settings
+    fuzzy_threshold: float = Field(
+        default=0.3,
+        description=(
+            "pg_trgm similarity threshold for candidate "
+            "pre-filter (0–1, lower = wider net)"
+        ),
+    )
+    candidate_limit: int = Field(
+        default=50,
+        description=(
+            "Max candidate rows passed from fuzzy "
+            "pre-filter to vector search"
+        ),
     )
 
     @model_validator(mode="after")
@@ -133,11 +156,6 @@ class PromptConfig:
     def system_prompt(self) -> str:
         """Get system prompt."""
         return self.config.get("system_prompt", "")
-
-    @property
-    def fields(self) -> List[Dict[str, Any]]:
-        """Get field definitions."""
-        return self.config.get("fields", [])
 
     @property
     def duplicate_detection(self) -> Dict[str, Any]:

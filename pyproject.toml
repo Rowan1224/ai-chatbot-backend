@@ -13,8 +13,8 @@ dependencies = [
     "langchain-openai>=0.2.9",
     "langchain-core>=0.3.15",
     # Database
-    "pymongo>=4.10.1",
-    "motor>=3.6.0",  # Async MongoDB driver
+    "asyncpg>=0.30.0",  # Async PostgreSQL driver
+    "pgvector>=0.3.6",  # pgvector Python client
     "redis>=5.2.0",
     # AI & ML
     "openai>=1.54.4",

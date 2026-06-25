@@ -16,7 +16,7 @@ from src.api.models import (
     HealthResponse,
 )
 from src.config.settings import settings
-from src.core.database import MongoDBClient, RedisClient
+from src.core.database import PostgreSQLClient, RedisClient
 from src.core.workflow import ConversationWorkflow
 
 # Configure logging
@@ -35,12 +35,12 @@ async def lifespan(app: FastAPI):
     logger.info("Starting AI Chatbot Backend...")
     
     # Initialize database clients
-    mongodb_client = MongoDBClient()
+    pg_client = PostgreSQLClient()
     redis_client = RedisClient()
-    
-    # Connect to MongoDB
-    await mongodb_client.connect()
-    logger.info("MongoDB connected")
+
+    # Connect to PostgreSQL
+    await pg_client.connect()
+    logger.info("PostgreSQL connected")
     
     # Create LangGraph checkpointer based on environment
     if settings.use_redis_checkpointer:
@@ -59,12 +59,12 @@ async def lifespan(app: FastAPI):
         logger.info("Using InMemory checkpointer (dev mode - no persistence)")
     
     # Initialize workflow with clients and compile with checkpointer
-    workflow = ConversationWorkflow(mongodb_client=mongodb_client)
+    workflow = ConversationWorkflow(pg_client=pg_client)
     conversation_app = workflow.compile(checkpointer=checkpointer)
     logger.info("LangGraph workflow compiled")
-    
+
     # Store in app state for access in endpoints
-    app.state.mongodb_client = mongodb_client
+    app.state.pg_client = pg_client
     app.state.redis_client = redis_client
     app.state.conversation_app = conversation_app
     
@@ -72,8 +72,8 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     logger.info("Shutting down AI Chatbot Backend...")
-    await mongodb_client.close()
-    logger.info("MongoDB connection closed")
+    await pg_client.close()
+    logger.info("PostgreSQL connection closed")
     
     if settings.use_redis_checkpointer:
         await redis_client.close()
@@ -207,12 +207,12 @@ async def health_check() -> HealthResponse:
     redis_status = "disconnected"
     
     try:
-        # Check MongoDB
-        await app.state.mongodb_client.client.admin.command("ping")
+        # Check PostgreSQL
+        await app.state.pg_client.ping()
         mongodb_status = "connected"
     except Exception as e:
-        logger.error(f"MongoDB health check failed: {e}")
-    
+        logger.error(f"PostgreSQL health check failed: {e}")
+
     try:
         # Check Redis (only if using Redis checkpointer)
         if settings.use_redis_checkpointer:
@@ -224,8 +224,13 @@ async def health_check() -> HealthResponse:
     except Exception as e:
         logger.error(f"Redis health check failed: {e}")
     
-    overall_status = "healthy" if mongodb_status == "connected" and redis_status == "connected" else "unhealthy"
-    
+    overall_status = (
+        "healthy"
+        if mongodb_status == "connected"
+        and redis_status == "connected"
+        else "unhealthy"
+    )
+
     return HealthResponse(
         status=overall_status,
         mongodb=mongodb_status,
