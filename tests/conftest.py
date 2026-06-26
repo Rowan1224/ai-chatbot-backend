@@ -1,25 +1,20 @@
 """Shared pytest fixtures and configuration."""
 
 import os
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from unittest.mock import MagicMock, AsyncMock
 
-# Set test environment variables
-os.environ["MONGODB_URL"] = "mongodb://localhost:27017/test_db"
-os.environ["REDIS_URL"] = "redis://localhost:6379"
-os.environ["OPENAI_API_KEY"] = "test-key"
-os.environ["API_KEY"] = "test-api-key"
-os.environ["LLM_PROVIDER"] = "openai"
-os.environ["CHAT_MODEL"] = "gpt-4"
-os.environ["EMBEDDING_MODEL"] = "text-embedding-3-small"
-
-
-@pytest.fixture
-def mock_mongodb_client():
-    """Create a mock MongoDB client."""
-    client = MagicMock()
-    client.get_collection = MagicMock()
-    return client
+# Minimum env vars required by pydantic-settings at import time.
+# These are overridden per-test or per-suite where real values matter.
+os.environ.setdefault("OPENAI_API_KEY", "test-key")
+os.environ.setdefault("API_KEY", "test-api-key")
+os.environ.setdefault("LLM_PROVIDER", "openai")
+os.environ.setdefault(
+    "POSTGRESQL_URL",
+    "postgresql://test:test@localhost:5432/test_chatbot",
+)
+os.environ.setdefault("REDIS_URL", "redis://localhost:6379")
 
 
 @pytest.fixture
@@ -54,7 +49,7 @@ def sample_request_data():
         "target_environment": "development",
         "business_justification": "Need to test new feature",
         "name": "John Doe",
-        "employee_id": "EMP12345"
+        "employee_id": "EMP12345",
     }
 
 
@@ -76,20 +71,17 @@ def sample_embedding():
 
 @pytest.fixture
 def sample_conversation_state():
-    """Sample conversation state."""
+    """Sample conversation state matching ConversationState TypedDict."""
     return {
         "messages": [],
         "collected_data": {},
         "is_ready": False,
         "is_complete": False,
         "duplicate_warning": [],
-        "config_version": "v1",
-        "update_existing": False,
-        "existing_request_id": None,
-        "temp_pii": {},
-        "awaiting_confirmation": False,
-        "pii_collected": False,
+        "config_version": "v2.0",
         "awaiting_duplicate_decision": False,
+        "duplicate_decision": None,
     }
+
 
 # Made with Bob

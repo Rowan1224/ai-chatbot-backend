@@ -14,7 +14,10 @@ import pytest
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.redis import AsyncRedisSaver
 
-from src.core.workflow import ChatResponse as WorkflowChatResponse, ConversationWorkflow
+from src.core.workflow import (
+    ChatResponse as WorkflowChatResponse,
+)
+from src.core.workflow import ConversationWorkflow
 
 pytestmark = pytest.mark.integration
 
@@ -70,7 +73,7 @@ class TestRedisSessionPersistence:
         await checkpointer.asetup()
 
         wf = _make_workflow(pg_client)
-        wf.llm_chat.invoke = MagicMock(
+        wf.llm_chat.ainvoke = AsyncMock(
             return_value=WorkflowChatResponse(
                 response="What environment?", is_ready=False
             )
@@ -112,7 +115,7 @@ class TestRedisSessionPersistence:
         await checkpointer.asetup()
 
         wf = _make_workflow(pg_client)
-        wf.llm_chat.invoke = MagicMock(
+        wf.llm_chat.ainvoke = AsyncMock(
             return_value=WorkflowChatResponse(response="ok", is_ready=False)
         )
 
@@ -156,7 +159,7 @@ class TestRedisSessionPersistence:
         await checkpointer1.asetup()
 
         wf1 = _make_workflow(pg_client)
-        wf1.llm_chat.invoke = MagicMock(
+        wf1.llm_chat.ainvoke = AsyncMock(
             return_value=WorkflowChatResponse(
                 response="Turn 1 response", is_ready=False
             )
@@ -176,7 +179,7 @@ class TestRedisSessionPersistence:
         await checkpointer2.asetup()
 
         wf2 = _make_workflow(pg_client)
-        wf2.llm_chat.invoke = MagicMock(
+        wf2.llm_chat.ainvoke = AsyncMock(
             return_value=WorkflowChatResponse(
                 response="Turn 2 response", is_ready=False
             )

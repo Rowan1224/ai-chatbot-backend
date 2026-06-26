@@ -136,7 +136,7 @@ class TestInfrastructure:
         assert body["status"] == "healthy", (
             f"Health check returned unhealthy: {body}"
         )
-        assert body["mongodb"] == "connected"
+        assert body["postgresql"] == "connected"
         assert body["redis"] == "connected"
 
     def test_openapi_docs_reachable(

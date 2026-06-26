@@ -1,6 +1,6 @@
 """Application settings and configuration loader."""
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import yaml
 from pydantic import Field, model_validator
@@ -25,11 +25,11 @@ class Settings(BaseSettings):
     )
 
     # OpenAI credentials (required when llm_provider=openai)
-    openai_api_key: Optional[str] = Field(default=None, description="OpenAI API key")
+    openai_api_key: str | None = Field(default=None, description="OpenAI API key")
 
     # Azure OpenAI credentials (required when llm_provider=azure)
-    azure_openai_api_key: Optional[str] = Field(default=None, description="Azure OpenAI API key")
-    azure_openai_endpoint: Optional[str] = Field(
+    azure_openai_api_key: str | None = Field(default=None, description="Azure OpenAI API key")
+    azure_openai_endpoint: str | None = Field(
         default=None, description="Azure OpenAI endpoint"
     )
     openai_api_version: str = Field(
@@ -37,14 +37,14 @@ class Settings(BaseSettings):
     )
 
     # Anthropic credentials (required when llm_provider=anthropic)
-    anthropic_api_key: Optional[str] = Field(default=None, description="Anthropic API key")
+    anthropic_api_key: str | None = Field(default=None, description="Anthropic API key")
 
     # LangSmith tracing (optional)
     langsmith_tracing: bool = Field(default=False, description="Enable LangSmith tracing")
-    langsmith_endpoint: Optional[str] = Field(
+    langsmith_endpoint: str | None = Field(
         default=None, description="LangSmith API endpoint"
     )
-    langsmith_api_key: Optional[str] = Field(default=None, description="LangSmith API key")
+    langsmith_api_key: str | None = Field(default=None, description="LangSmith API key")
     langsmith_project: str = Field(default="default", description="LangSmith project name")
 
     # PostgreSQL — connection string includes credentials and host
@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     redis_url: str = Field(default="redis://localhost:6379", description="Redis connection URL")
     redis_host: str = Field(default="localhost", description="Redis host")
     redis_port: int = Field(default=6379, description="Redis port")
-    redis_password: Optional[str] = Field(default=None, description="Redis password")
+    redis_password: str | None = Field(default=None, description="Redis password")
     use_redis_checkpointer: bool = Field(
         default=True,
         description="Use Redis for LangGraph checkpointing (False = InMemory for dev/test)"
@@ -111,8 +111,8 @@ class PromptConfig:
     """
 
     def __init__(self, config_path: str) -> None:
-        with open(config_path, "r") as f:
-            self._config: Dict[str, Any] = yaml.safe_load(f)
+        with open(config_path) as f:
+            self._config: dict[str, Any] = yaml.safe_load(f)
 
     @property
     def config_version(self) -> str:
@@ -131,8 +131,8 @@ class AppConfig:
     """
 
     def __init__(self, config_path: str) -> None:
-        with open(config_path, "r") as f:
-            self._config: Dict[str, Any] = yaml.safe_load(f)
+        with open(config_path) as f:
+            self._config: dict[str, Any] = yaml.safe_load(f)
 
     # --- LLM models ---
 
@@ -177,13 +177,19 @@ class AppConfig:
     # --- Privacy ---
 
     @property
-    def pii_fields(self) -> List[str]:
+    def pii_fields(self) -> list[str]:
         return self._config.get("privacy", {}).get("pii_fields", [])
 
     # --- CORS ---
 
     @property
-    def cors_origins(self) -> List[str]:
+    def rate_limit_rpm(self) -> int:
+        return self._config.get(
+            "rate_limiting", {}
+        ).get("requests_per_minute", 30)
+
+    @property
+    def cors_origins(self) -> list[str]:
         return self._config.get("cors", {}).get("origins", [])
 
     # --- Logging ---

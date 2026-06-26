@@ -14,14 +14,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
-from src.api.models import ChatResponse, HealthResponse
-from src.core.database import save_request
 from src.core.schema import DataField, ExtractedRequest
 from src.core.workflow import (
     ChatResponse as WorkflowChatResponse,
+)
+from src.core.workflow import (
     ConversationWorkflow,
     DuplicateJudgement,
 )
@@ -71,7 +70,7 @@ def app_state(pg_client):
     from src.api.main import app
 
     wf = _build_workflow(pg_client)
-    wf.llm_chat.invoke = MagicMock(
+    wf.llm_chat.ainvoke = AsyncMock(
         return_value=WorkflowChatResponse(response="How can I help?", is_ready=False)
     )
     wf.llm_duplicate_judge.ainvoke = AsyncMock(
@@ -124,7 +123,7 @@ class TestHealthEndpoint:
                 resp = await client.get("/health")
 
         body = resp.json()
-        assert body["mongodb"] == "connected"
+        assert body["postgresql"] == "connected"
 
     @pytest.mark.asyncio
     async def test_health_redis_disabled_in_dev_mode(self, app_state):
@@ -207,7 +206,7 @@ class TestChatEndpoint:
     async def test_chat_returns_200_and_valid_shape(self, app_state):
         """POST /chat must return 200 with the expected response fields."""
         app, wf = app_state
-        wf.llm_chat.invoke = MagicMock(
+        wf.llm_chat.ainvoke = AsyncMock(
             return_value=WorkflowChatResponse(
                 response="What environment do you need?", is_ready=False
             )
@@ -241,12 +240,12 @@ class TestChatEndpoint:
         exactly one row must be saved in PostgreSQL.
         """
         app, wf = app_state
-        wf.llm_chat.invoke = MagicMock(
+        wf.llm_chat.ainvoke = AsyncMock(
             return_value=WorkflowChatResponse(
                 response="Got everything.", is_ready=True
             )
         )
-        wf.llm_extract.invoke = MagicMock(
+        wf.llm_extract.ainvoke = AsyncMock(
             return_value=ExtractedRequest(
                 request_type="infrastructure-provisioning",
                 name="Jane",

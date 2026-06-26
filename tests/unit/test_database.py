@@ -13,9 +13,7 @@ from src.core.database import (
     find_fuzzy_candidates,
     find_similar_requests,
     save_request,
-    update_request,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -400,74 +398,6 @@ class TestSaveRequest:
         assert args[3] == embedding, "embedding missing"
         assert isinstance(args[4], datetime), (
             "created_at must be a datetime"
-        )
-
-
-# ---------------------------------------------------------------------------
-# update_request
-# ---------------------------------------------------------------------------
-
-
-class TestUpdateRequest:
-    """Updating existing requests in PostgreSQL."""
-
-    @pytest.mark.asyncio
-    async def test_update_request_success(self):
-        """Returns True when the UPDATE affects one row."""
-        client, conn = _mock_pg_client()
-        conn.execute = AsyncMock(return_value="UPDATE 1")
-
-        result = await update_request(
-            pg_client=client,
-            request_id=str(uuid.uuid4()),
-            data={"request_type": "updated"},
-            embedding=[0.1] * 1536,
-        )
-
-        assert result is True
-        conn.execute.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_update_request_not_found(self):
-        """Returns False when no row matches the UUID."""
-        client, conn = _mock_pg_client()
-        conn.execute = AsyncMock(return_value="UPDATE 0")
-
-        result = await update_request(
-            pg_client=client,
-            request_id=str(uuid.uuid4()),
-            data={"request_type": "updated"},
-            embedding=[0.1] * 1536,
-        )
-
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_update_sets_updated_at(self):
-        """
-        CRITICAL: UPDATE must include updated_at timestamp.
-
-        Check that a datetime is passed as the 4th positional
-        parameter ($4 in the SQL).
-        """
-        client, conn = _mock_pg_client()
-        conn.execute = AsyncMock(return_value="UPDATE 1")
-
-        await update_request(
-            pg_client=client,
-            request_id=str(uuid.uuid4()),
-            data={"request_type": "updated"},
-            embedding=[0.1] * 1536,
-        )
-
-        args = conn.execute.call_args[0]
-        # args[0]=SQL, [1]=data JSON, [2]=embedding,
-        # [3]=config_version, [4]=updated_at, [5]=UUID
-        assert isinstance(args[4], datetime), (
-            "updated_at must be a datetime"
-        )
-        assert isinstance(args[5], uuid.UUID), (
-            "id param must be a UUID, not a string"
         )
 
 

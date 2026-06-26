@@ -11,7 +11,7 @@ always crosses the duplicate-detection similarity threshold.
 """
 
 import math
-from typing import Any, List, Optional
+from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
@@ -22,7 +22,7 @@ from pydantic import Field
 # Scripted conversation — one reply per turn
 # ---------------------------------------------------------------------------
 
-SCRIPT: List[str] = [
+SCRIPT: list[str] = [
     # Turn 1
     "I'm here to help you submit a request. "
     "What type of request do you have? "
@@ -44,7 +44,7 @@ SCRIPT: List[str] = [
 # duplicate detection always fires on the second identical submission.
 _DIM = 1536
 _UNIT = 1.0 / math.sqrt(_DIM)
-FIXED_EMBEDDING: List[float] = [_UNIT] * _DIM
+FIXED_EMBEDDING: list[float] = [_UNIT] * _DIM
 
 
 # ---------------------------------------------------------------------------
@@ -170,8 +170,8 @@ class MockChatModel(BaseChatModel):
 
     def _generate(
         self,
-        messages: List[BaseMessage],
-        stop: Optional[List[str]] = None,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
         **kwargs: Any,
     ) -> ChatResult:
         idx = self.call_count % len(SCRIPT)
@@ -199,10 +199,10 @@ class MockChatModel(BaseChatModel):
 class MockEmbeddings:
     """Returns the fixed unit-vector for every query."""
 
-    async def aembed_query(self, text: str) -> List[float]:
+    async def aembed_query(self, text: str) -> list[float]:
         return list(FIXED_EMBEDDING)
 
-    def embed_query(self, text: str) -> List[float]:
+    def embed_query(self, text: str) -> list[float]:
         return list(FIXED_EMBEDDING)
 
 

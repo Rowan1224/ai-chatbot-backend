@@ -23,19 +23,27 @@ src/config/prompt_config.yaml # System prompt and version
 ### First-time setup
 
 ```bash
-# 1. Generate .env interactively
+# 1. Install dependencies
+uv sync
+
+# 2. Generate .env interactively
 chmod +x scripts/setup-local-env.sh
 ./scripts/setup-local-env.sh
 
-# 2. Start Postgres + Redis
+# 3. Start Postgres + Redis
 docker compose up -d postgres redis
 
-# 3. Start the API (with hot reload)
+# 4. Start the API (with hot reload)
 uv run uvicorn src.api.main:app --reload
 ```
 
-The API will be available at `http://localhost:8000`.  
+The API will be available at `http://localhost:8000`.
 Swagger docs at `http://localhost:8000/docs`.
+
+> **`./deploy/build.sh` is not a setup step.** It builds a Docker image,
+> runs the full integration + E2E test suite against it, and tags the image.
+> Run it when you want to produce a release-ready artefact, not during
+> initial development setup.
 
 ### Run the full local stack (API in container)
 
@@ -52,8 +60,41 @@ uv run pytest tests/unit/ -v
 # Integration tests (spins up Postgres + Redis via testcontainers)
 uv run pytest tests/integration/ -v -m integration
 
-# Full build + all tests + Docker image
+# Full build + all tests + Docker image (interactive — prompts for runtime)
 ./deploy/build.sh
+
+# Non-interactive — skip the prompt by setting CONTAINER_RUNTIME
+CONTAINER_RUNTIME=docker ./deploy/build.sh
+CONTAINER_RUNTIME=podman ./deploy/build.sh
+```
+
+#### `build.sh` in CI/CD pipelines
+
+`build.sh` is non-interactive when `CONTAINER_RUNTIME` is set as an environment
+variable. Without it, the script detects a non-TTY environment and silently
+defaults to `docker`.
+
+| Variable | Values | Default |
+|---|---|---|
+| `CONTAINER_RUNTIME` | `docker` \| `podman` | `docker` |
+
+**GitHub Actions example:**
+
+```yaml
+- name: Build, test, and tag image
+  env:
+    CONTAINER_RUNTIME: docker
+  run: ./deploy/build.sh
+```
+
+**Azure Pipelines example:**
+
+```yaml
+- task: Bash@3
+  env:
+    CONTAINER_RUNTIME: docker
+  inputs:
+    script: ./deploy/build.sh
 ```
 
 ### Generate a secure API key
@@ -158,7 +199,7 @@ curl http://localhost:8000/health
 
 Expected response:
 ```json
-{"status": "healthy", "mongodb": "connected", "redis": "connected"}
+{"status": "healthy", "postgresql": "connected", "redis": "connected"}
 ```
 
 ---

@@ -4,13 +4,17 @@ import json
 import logging
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import asyncpg
 from pgvector.asyncpg import register_vector
 from redis.asyncio import Redis
 
-from src.config.settings import app_config, prompt_config, settings
+from src.config.settings import (
+    app_config,
+    prompt_config,
+    settings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +48,7 @@ class PostgreSQLClient:
 
     def __init__(self) -> None:
         """Initialize PostgreSQL client."""
-        self.pool: Optional[asyncpg.Pool] = None
+        self.pool: asyncpg.Pool | None = None
 
     async def connect(self) -> None:
         """
@@ -117,8 +121,8 @@ async def _init_connection(conn: asyncpg.Connection) -> None:
 
 async def save_request(
     pg_client: PostgreSQLClient,
-    data: Dict[str, Any],
-    embedding: List[float],
+    data: dict[str, Any],
+    embedding: list[float],
 ) -> str:
     """
     Insert a new request row and return its UUID string.
@@ -150,64 +154,13 @@ async def save_request(
     return request_id
 
 
-async def update_request(
-    pg_client: PostgreSQLClient,
-    request_id: str,
-    data: Dict[str, Any],
-    embedding: List[float],
-) -> bool:
-    """
-    Update an existing request row.
-
-    Args:
-        pg_client: PostgreSQL client instance
-        request_id: UUID of the row to update
-        data: Updated request data
-        embedding: Updated vector embedding
-
-    Returns:
-        True if a row was updated, False if not found
-    """
-    try:
-        async with pg_client.pool.acquire() as conn:
-            result = await conn.execute(
-                """
-                UPDATE requests
-                SET data           = $1,
-                    embedding      = $2,
-                    config_version = $3,
-                    updated_at     = $4
-                WHERE id = $5
-                """,
-                json.dumps(data),
-                embedding,
-                prompt_config.config_version,
-                datetime.utcnow(),
-                uuid.UUID(request_id),
-            )
-        # asyncpg returns "UPDATE <n>"
-        updated = int(result.split()[-1])
-        if updated > 0:
-            logger.info(
-                f"Updated request with ID: {request_id}"
-            )
-            return True
-        logger.warning(
-            f"No request found with ID: {request_id}"
-        )
-        return False
-    except Exception as e:
-        logger.error(f"Failed to update request: {e}")
-        return False
-
-
 async def find_fuzzy_candidates(
     pg_client: PostgreSQLClient,
     request_type: str,
     lookback_days: int = 90,
     fuzzy_threshold: float = 0.3,
     limit: int = 50,
-) -> List[str]:
+) -> list[str]:
     """
     Stage 1 — fuzzy pre-filter using pg_trgm similarity.
 
@@ -256,10 +209,10 @@ async def find_fuzzy_candidates(
 
 async def find_similar_requests(
     pg_client: PostgreSQLClient,
-    embedding: List[float],
-    candidate_ids: List[str],
+    embedding: list[float],
+    candidate_ids: list[str],
     threshold: float = 0.85,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     Stage 2 — vector similarity search scoped to candidates.
 
@@ -311,10 +264,10 @@ async def find_similar_requests(
 
 async def _pgvector_search(
     pg_client: PostgreSQLClient,
-    embedding: List[float],
-    candidate_ids: List[str],
+    embedding: list[float],
+    candidate_ids: list[str],
     threshold: float,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     pgvector HNSW cosine search scoped to ``candidate_ids``.
 
@@ -352,18 +305,33 @@ async def _pgvector_search(
 
 async def _local_similarity_search(
     pg_client: PostgreSQLClient,
-    embedding: List[float],
-    candidate_ids: List[str],
+    embedding: list[float],
+    candidate_ids: list[str],
     threshold: float,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     Fallback: in-process cosine similarity scoped to candidates.
 
     Fetches only the candidate rows (already limited by the
     fuzzy pre-filter) so no OOM risk.
+
+    Requires numpy and scikit-learn, which are dev-only dependencies
+    (not present in the production image).  If either is missing this
+    function logs a clear error and returns empty — the same safe
+    default used when pgvector itself raises an exception.
+    To enable this path in production, install the extras:
+        pip install numpy scikit-learn
     """
-    import numpy as np
-    from sklearn.metrics.pairwise import cosine_similarity
+    try:
+        import numpy as np
+        from sklearn.metrics.pairwise import cosine_similarity
+    except ImportError as exc:
+        logger.error(
+            f"Local similarity fallback unavailable: {exc}. "
+            "Install numpy and scikit-learn to enable it, or set "
+            "vector_search_provider=pgvector in app_config.yaml."
+        )
+        return []
 
     uuids = [uuid.UUID(cid) for cid in candidate_ids]
 
@@ -380,7 +348,7 @@ async def _local_similarity_search(
         )
 
     query_vec = np.array(embedding).reshape(1, -1)
-    similar: List[Dict[str, Any]] = []
+    similar: list[dict[str, Any]] = []
 
     for row in rows:
         doc_vec = np.array(
@@ -404,7 +372,7 @@ async def _local_similarity_search(
     return similar[:5]
 
 
-def _row_to_dict(row: asyncpg.Record) -> Dict[str, Any]:
+def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
     """Convert an asyncpg Record to a plain dict."""
     d = dict(row)
     # Normalise id to string
@@ -421,7 +389,7 @@ class RedisClient:
 
     def __init__(self) -> None:
         """Initialize Redis client."""
-        self.client: Optional[Redis] = None
+        self.client: Redis | None = None
 
     async def connect(self) -> None:
         """Connect to Redis."""

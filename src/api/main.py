@@ -1,10 +1,20 @@
 """FastAPI application for AI Chatbot Backend."""
 
+import asyncio
 import logging
 import secrets
+from collections import deque
 from contextlib import asynccontextmanager
+from time import monotonic
 
-from fastapi import Depends, FastAPI, HTTPException, Header, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
@@ -13,8 +23,8 @@ from langgraph.checkpoint.redis import AsyncRedisSaver
 from src.api.models import (
     ChatRequest,
     ChatResponse,
-    SessionResponse,
     HealthResponse,
+    SessionResponse,
 )
 from src.config.settings import app_config, settings
 from src.core.database import PostgreSQLClient, RedisClient
@@ -29,36 +39,104 @@ logger = logging.getLogger(__name__)
 
 
 # Lifespan context manager for startup/shutdown
+# ---------------------------------------------------------------------------
+# Per-session sliding-window rate limiter
+# ---------------------------------------------------------------------------
+
+# module-level store: session_id → deque of monotonic timestamps
+_rate_limit_store: dict[str, deque[float]] = {}
+_WINDOW = 60.0  # seconds
+
+
+async def check_rate_limit(request: Request) -> None:
+    """
+    FastAPI dependency — enforces a per-session sliding-window rate limit.
+
+    The limit (requests_per_minute) is read from app_config.yaml so it
+    can be tuned without a code change.  Setting it to 0 disables the
+    check entirely.
+    """
+    rpm = app_config.rate_limit_rpm
+    if rpm <= 0:
+        return  # rate limiting disabled
+
+    # Extract session_id from the JSON body.
+    # Body is already validated by Pydantic before this dep runs.
+    body = await request.json()
+    session_id = body.get("session_id", "")
+
+    now = monotonic()
+    window = _rate_limit_store.setdefault(session_id, deque())
+
+    # Drop timestamps older than the sliding window
+    while window and now - window[0] > _WINDOW:
+        window.popleft()
+
+    if len(window) >= rpm:
+        retry_after = int(_WINDOW - (now - window[0])) + 1
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                f"Rate limit exceeded: max {rpm} requests "
+                f"per {int(_WINDOW)}s per session."
+            ),
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    window.append(now)
+
+
+# ---------------------------------------------------------------------------
+# Lifespan
+# ---------------------------------------------------------------------------
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handle startup and shutdown events."""
     # Startup
     logger.info("Starting AI Chatbot Backend...")
-    
+
     # Initialize database clients
     pg_client = PostgreSQLClient()
     redis_client = RedisClient()
 
-    # Connect to PostgreSQL
-    await pg_client.connect()
-    logger.info("PostgreSQL connected")
-    
+    # Connect to PostgreSQL — retry up to 3 times to tolerate brief
+    # unavailability during rolling deployments or container startup.
+    for attempt in range(1, 4):
+        try:
+            await pg_client.connect()
+            logger.info("PostgreSQL connected")
+            break
+        except Exception as exc:
+            if attempt == 3:
+                logger.error(
+                    "PostgreSQL connection failed after 3 attempts"
+                )
+                raise
+            wait = attempt * 2  # 2s, 4s
+            logger.warning(
+                f"PostgreSQL connection attempt {attempt} failed "
+                f"({exc}); retrying in {wait}s…"
+            )
+            await asyncio.sleep(wait)
+
     # Create LangGraph checkpointer based on environment
     if settings.use_redis_checkpointer:
         # Production/Test/Acc: Use Redis for persistence
         await redis_client.connect()
         logger.info("Redis connected")
-        
+
         redis_conn = await redis_client.get_client()
         checkpointer = AsyncRedisSaver(redis_client=redis_conn)
         await checkpointer.asetup()
-        
+
         logger.info(f"Using Redis checkpointer at {settings.redis_url}")
     else:
         # Development: Use in-memory (no persistence between restarts)
         checkpointer = InMemorySaver()
         logger.info("Using InMemory checkpointer (dev mode - no persistence)")
-    
+
     # Initialize workflow with clients and compile with checkpointer
     workflow = ConversationWorkflow(pg_client=pg_client)
     conversation_app = workflow.compile(checkpointer=checkpointer)
@@ -68,14 +146,14 @@ async def lifespan(app: FastAPI):
     app.state.pg_client = pg_client
     app.state.redis_client = redis_client
     app.state.conversation_app = conversation_app
-    
+
     yield
-    
+
     # Shutdown
     logger.info("Shutting down AI Chatbot Backend...")
     await pg_client.close()
     logger.info("PostgreSQL connection closed")
-    
+
     if settings.use_redis_checkpointer:
         await redis_client.close()
         logger.info("Redis connection closed")
@@ -104,7 +182,7 @@ app.add_middleware(
 async def verify_api_key(x_api_key: str = Header(..., alias="X-API-Key")) -> None:
     """
     Verify API key from header.
-    
+
     This is a FastAPI dependency that can be injected into endpoints.
     Raises HTTPException if the API key is invalid.
     """
@@ -119,40 +197,39 @@ async def verify_api_key(x_api_key: str = Header(..., alias="X-API-Key")) -> Non
 @app.post("/chat", response_model=ChatResponse, tags=["Chat"])
 async def chat(
     request: ChatRequest,
-    _: None = Depends(verify_api_key),
+    _auth: None = Depends(verify_api_key),
+    _rate: None = Depends(check_rate_limit),
 ) -> ChatResponse:
     """
     Send a message to the chatbot and get a response.
-    
-    The chatbot maintains conversation state using the session_id and handles
-    the complete conversation flow including:
+
+    The chatbot maintains conversation state using the session_id and drives
+    a multi-turn LangGraph workflow:
     1. Collecting request details through natural conversation
-    2. Extracting structured data when ready
-    3. Collecting PII (name and employee ID) in format: NAME,EMPLOYEE_ID
-    4. Confirming PII with the user
-    5. Checking for duplicate requests
-    6. Saving the request to MongoDB
-    
+    2. Extracting structured data when all fields are ready
+    3. Checking for duplicate requests (fuzzy → vector → LLM judge)
+    4. Saving the request to PostgreSQL on confirmation
+
     When the request is successfully saved, is_complete will be True.
-    
-    If duplicates are found, the bot will ask if you want to update the existing
-    request or create a new one. Respond with 'update' or 'new'.
+
+    If duplicates are found the bot pauses and asks the user to choose:
+    'proceed', 'modify', or 'cancel'.
     """
     logger.info(f"Chat request from session {request.session_id}: {request.message}")
-    
+
     try:
         # Invoke LangGraph workflow
         result = await app.state.conversation_app.ainvoke(
             {"messages": [HumanMessage(content=request.message)]},
             config={"configurable": {"thread_id": request.session_id}},
         )
-        
+
         # Extract response from result
         last_message = result["messages"][-1] if result.get("messages") else None
         response_text = last_message.content if last_message else "No response generated"
-        
+
         logger.info(f"Chat response for session {request.session_id}: is_complete={result.get('is_complete', False)}")
-        
+
         return ChatResponse(
             session_id=request.session_id,
             response=response_text,
@@ -161,13 +238,13 @@ async def chat(
             collected_data=result.get("collected_data"),
             duplicate_warning=result.get("duplicate_warning"),
         )
-        
+
     except Exception as e:
         logger.error(f"Error in chat endpoint: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to process chat message: {str(e)}",
-        )
+        ) from e
 
 
 @app.get("/session/{session_id}", response_model=SessionResponse, tags=["Debug"])
@@ -177,7 +254,7 @@ async def get_session(
 ) -> SessionResponse:
     """
     Get the current state of a session (for debugging).
-    
+
     Returns the full conversation state including messages and collected data.
     """
     try:
@@ -189,29 +266,29 @@ async def get_session(
             session_id=session_id,
             state=state.values,
         )
-        
+
     except Exception as e:
         logger.error(f"Error getting session state: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get session state: {str(e)}",
-        )
+        ) from e
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check() -> HealthResponse:
     """
     Health check endpoint for Docker and monitoring.
-    
-    Checks connectivity to MongoDB and Redis.
+
+    Checks connectivity to PostgreSQL and Redis.
     """
-    mongodb_status = "disconnected"
+    postgresql_status = "disconnected"
     redis_status = "disconnected"
-    
+
     try:
         # Check PostgreSQL
         await app.state.pg_client.ping()
-        mongodb_status = "connected"
+        postgresql_status = "connected"
     except Exception as e:
         logger.error(f"PostgreSQL health check failed: {e}")
 
@@ -225,17 +302,17 @@ async def health_check() -> HealthResponse:
             redis_status = "disabled (dev mode)"
     except Exception as e:
         logger.error(f"Redis health check failed: {e}")
-    
+
     overall_status = (
         "healthy"
-        if mongodb_status == "connected"
-        and redis_status == "connected"
+        if postgresql_status == "connected"
+        and redis_status in ("connected", "disabled (dev mode)")
         else "unhealthy"
     )
 
     return HealthResponse(
         status=overall_status,
-        mongodb=mongodb_status,
+        postgresql=postgresql_status,
         redis=redis_status,
     )
 

@@ -55,6 +55,8 @@ _llm_module.get_embedding_model = _get_embedding_model  # type: ignore[assignmen
 
 # Step 4: now import the real FastAPI app — all its internal calls to
 # get_llm() / get_embedding_model() will go through the mocks above.
-from src.api.main import app  # noqa: E402, F401  (re-exported for Gunicorn)
+from src.api.main import (  # noqa: E402, F401
+    app,  # re-exported for Gunicorn
+)
 
 # Made with Bob

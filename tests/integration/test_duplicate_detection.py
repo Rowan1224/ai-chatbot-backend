@@ -11,7 +11,6 @@ Stages under test:
   Full pipeline — both stages chained
 """
 
-import json
 import uuid
 from datetime import datetime, timedelta
 from unittest.mock import patch
@@ -36,7 +35,7 @@ pytestmark = pytest.mark.integration
 #   EMBED_A · EMBED_B  ≈ 0.0   (orthogonal — should never pass threshold)
 # We use a simple construction: fill all dims with equal values, normalised.
 
-import math
+import math  # noqa: E402 (must follow pytestmark assignment)
 
 _DIM = 1536
 _SCALE = 1.0 / math.sqrt(_DIM)

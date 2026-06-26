@@ -1,6 +1,5 @@
 """LLM provider factory - returns appropriate LLM based on configuration."""
 
-from typing import Optional
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
@@ -14,7 +13,7 @@ from langchain_openai import (
 from src.config.settings import app_config, settings
 
 
-def get_llm(model: Optional[str] = None) -> BaseChatModel:
+def get_llm(model: str | None = None) -> BaseChatModel:
     """
     Get LLM instance based on configured provider.
 
@@ -59,7 +58,7 @@ def get_llm(model: Optional[str] = None) -> BaseChatModel:
         )
 
 
-def get_embedding_model(model: Optional[str] = None):
+def get_embedding_model(model: str | None = None):
     """
     Get embedding model for vector search.
 

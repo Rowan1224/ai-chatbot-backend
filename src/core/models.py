@@ -1,7 +1,11 @@
 """Pydantic models and state definitions for the conversation workflow."""
 
 import operator
-from typing import Annotated, Any, Dict, List, Optional, TypedDict
+from typing import (
+    Annotated,
+    Any,
+    TypedDict,
+)
 
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
@@ -62,13 +66,13 @@ class ConversationState(TypedDict, total=False):
     than direct key access.
     """
 
-    messages: Annotated[List[BaseMessage], operator.add]
-    collected_data: Dict[str, Any]
+    messages: Annotated[list[BaseMessage], operator.add]
+    collected_data: dict[str, Any]
     is_ready: bool
     is_complete: bool
-    duplicate_warning: List[Dict[str, Any]]
+    duplicate_warning: list[dict[str, Any]]
     config_version: str
     awaiting_duplicate_decision: bool
     # 'modify' | 'proceed' | 'cancel' | None — set by
     # handle_duplicate_decision_node so the router can branch cleanly
-    duplicate_decision: Optional[str]
+    duplicate_decision: str | None

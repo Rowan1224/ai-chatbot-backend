@@ -13,7 +13,7 @@ Historical records are preserved as-is: their ``data`` JSONB blob
 reflects whatever schema was active when they were submitted.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -62,7 +62,7 @@ class ExtractedRequest(BaseModel):
     employee_id: str = Field(
         description="Requester's employee ID (e.g. EMP12345)."
     )
-    additional_data: List[DataField] = Field(
+    additional_data: list[DataField] = Field(
         default_factory=list,
         description=(
             "All other information collected during the "
@@ -73,7 +73,7 @@ class ExtractedRequest(BaseModel):
     )
 
 
-def extracted_to_dict(extracted: ExtractedRequest) -> Dict[str, Any]:
+def extracted_to_dict(extracted: ExtractedRequest) -> dict[str, Any]:
     """
     Flatten ``ExtractedRequest`` into a single dict for storage.
 
@@ -100,7 +100,7 @@ def extracted_to_dict(extracted: ExtractedRequest) -> Dict[str, Any]:
             "business_justification": "...",
           }
     """
-    data: Dict[str, Any] = {
+    data: dict[str, Any] = {
         "request_type": extracted.request_type,
         "name": extracted.name,
         "employee_id": extracted.employee_id,
@@ -110,7 +110,7 @@ def extracted_to_dict(extracted: ExtractedRequest) -> Dict[str, Any]:
     return data
 
 
-def get_text_fields(data: Dict[str, Any]) -> List[str]:
+def get_text_fields(data: dict[str, Any]) -> list[str]:
     """
     Return the non-PII text field names present in ``data``.
 

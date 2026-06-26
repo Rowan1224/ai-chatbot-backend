@@ -1,9 +1,10 @@
 """Unit tests for src/core/llm.py — LLM provider factory."""
 
-import pytest
 from unittest.mock import MagicMock, patch
 
-from src.core.llm import get_llm, get_embedding_model
+import pytest
+
+from src.core.llm import get_embedding_model, get_llm
 
 
 class TestGetLlm:

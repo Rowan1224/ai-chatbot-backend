@@ -47,9 +47,9 @@ ENV PATH="/app/.venv/bin:$PATH"
 # Expose port
 EXPOSE 8000
 
-# Health check
+# Health check — uses stdlib urllib.request; no third-party package needed
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8000/health', timeout=5)" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)" || exit 1
 
 # Run with Gunicorn + Uvicorn workers for production
 # --workers: Number of worker processes (2-4 x CPU cores recommended)

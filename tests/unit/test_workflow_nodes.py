@@ -5,14 +5,22 @@ All LLM / database / embedding calls are mocked so tests run
 without any real external services.
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+import pytest
+from langchain_core.messages import (
+    HumanMessage,
+    SystemMessage,
+)
 
-from src.core.models import ChatResponse, DuplicateDecision, DuplicateJudgement
-from src.core.workflow import ConversationState, ConversationWorkflow
-
+from src.core.models import (
+    ChatResponse,
+    DuplicateDecision,
+    DuplicateJudgement,
+)
+from src.core.workflow import (
+    ConversationWorkflow,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -72,7 +80,7 @@ class TestChatNode:
     @pytest.mark.asyncio
     async def test_chat_node_returns_ai_message(self, workflow):
         """chat_node returns an AIMessage with the LLM response."""
-        workflow.llm_chat.invoke = MagicMock(
+        workflow.llm_chat.ainvoke = AsyncMock(
             return_value=ChatResponse(response="Hello user!", is_ready=False)
         )
 
@@ -86,7 +94,7 @@ class TestChatNode:
     @pytest.mark.asyncio
     async def test_chat_node_sets_is_ready_true(self, workflow):
         """When LLM signals ready, is_ready=True propagates."""
-        workflow.llm_chat.invoke = MagicMock(
+        workflow.llm_chat.ainvoke = AsyncMock(
             return_value=ChatResponse(response="All done!", is_ready=True)
         )
 
@@ -100,11 +108,11 @@ class TestChatNode:
         """chat_node prepends SystemMessage when none is present."""
         captured_msgs = []
 
-        def capture(msgs):
+        async def capture(msgs):
             captured_msgs.extend(msgs)
             return ChatResponse(response="ok", is_ready=False)
 
-        workflow.llm_chat.invoke = MagicMock(side_effect=capture)
+        workflow.llm_chat.ainvoke = capture
 
         state = _make_state(messages=[HumanMessage(content="start")])
         await workflow.chat_node(state)
@@ -116,11 +124,11 @@ class TestChatNode:
         """chat_node does NOT prepend a second SystemMessage."""
         captured_msgs = []
 
-        def capture(msgs):
+        async def capture(msgs):
             captured_msgs.extend(msgs)
             return ChatResponse(response="ok", is_ready=False)
 
-        workflow.llm_chat.invoke = MagicMock(side_effect=capture)
+        workflow.llm_chat.ainvoke = capture
 
         state = _make_state(
             messages=[
@@ -130,7 +138,9 @@ class TestChatNode:
         )
         await workflow.chat_node(state)
 
-        system_count = sum(1 for m in captured_msgs if isinstance(m, SystemMessage))
+        system_count = sum(
+            1 for m in captured_msgs if isinstance(m, SystemMessage)
+        )
         assert system_count == 1
 
 
@@ -147,7 +157,7 @@ class TestExtractNode:
         """Successful extraction returns collected_data and is_complete=True."""
         from src.core.schema import DataField, ExtractedRequest
 
-        workflow.llm_extract.invoke = MagicMock(
+        workflow.llm_extract.ainvoke = AsyncMock(
             return_value=ExtractedRequest(
                 request_type="infrastructure-provisioning",
                 name="Jane",
@@ -169,7 +179,7 @@ class TestExtractNode:
     @pytest.mark.asyncio
     async def test_extract_node_failure_returns_error_message(self, workflow):
         """When LLM extraction throws, node returns an error AIMessage."""
-        workflow.llm_extract.invoke = MagicMock(
+        workflow.llm_extract.ainvoke = AsyncMock(
             side_effect=RuntimeError("LLM timeout")
         )
 
@@ -377,7 +387,6 @@ class TestDuplicateCheckNode:
     async def test_no_duplicate_when_judge_says_false(self, workflow):
         """LLM judge returning is_duplicate=False leads to empty result."""
         import uuid
-
         from datetime import datetime
 
         candidate_id = str(uuid.uuid4())

@@ -8,11 +8,10 @@ the correct database side-effects and state transitions.
 """
 
 import math
-import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
 from src.core.database import save_request
@@ -83,13 +82,13 @@ class TestWorkflowHappyPath:
         wf = _make_workflow(pg_client)
 
         # chat node: LLM says all info is collected
-        wf.llm_chat.invoke = MagicMock(
+        wf.llm_chat.ainvoke = AsyncMock(
             return_value=ChatResponse(
                 response="Got everything, submitting now.", is_ready=True
             )
         )
         # extract node: returns a valid structured request
-        wf.llm_extract.invoke = MagicMock(
+        wf.llm_extract.ainvoke = AsyncMock(
             return_value=ExtractedRequest(
                 request_type="infrastructure-provisioning",
                 name="Jane",
@@ -123,10 +122,10 @@ class TestWorkflowHappyPath:
     async def test_happy_path_response_is_complete(self, pg_client, clean_db):
         """result['is_complete'] must be True after a successful save."""
         wf = _make_workflow(pg_client)
-        wf.llm_chat.invoke = MagicMock(
+        wf.llm_chat.ainvoke = AsyncMock(
             return_value=ChatResponse(response="Done.", is_ready=True)
         )
-        wf.llm_extract.invoke = MagicMock(
+        wf.llm_extract.ainvoke = AsyncMock(
             return_value=ExtractedRequest(
                 request_type="service-deployment",
                 name="Bob",
@@ -163,10 +162,10 @@ class TestExtractFailure:
     async def test_extract_failure_does_not_save(self, pg_client, clean_db):
         """If extraction throws, no row must be saved."""
         wf = _make_workflow(pg_client)
-        wf.llm_chat.invoke = MagicMock(
+        wf.llm_chat.ainvoke = AsyncMock(
             return_value=ChatResponse(response="Ready.", is_ready=True)
         )
-        wf.llm_extract.invoke = MagicMock(
+        wf.llm_extract.ainvoke = AsyncMock(
             side_effect=RuntimeError("LLM timed out")
         )
 
@@ -210,10 +209,10 @@ class TestDuplicateDetectionInteraction:
         # Use the same embedding so cosine similarity = 1.0
         wf.embedding_model.aembed_query = AsyncMock(return_value=EMBED_MATCH)
 
-        wf.llm_chat.invoke = MagicMock(
+        wf.llm_chat.ainvoke = AsyncMock(
             return_value=ChatResponse(response="Ready.", is_ready=True)
         )
-        wf.llm_extract.invoke = MagicMock(
+        wf.llm_extract.ainvoke = AsyncMock(
             return_value=ExtractedRequest(
                 request_type="infrastructure-provisioning",
                 name="New User",
@@ -234,7 +233,7 @@ class TestDuplicateDetectionInteraction:
             )
         )
 
-        with patch("src.core.workflow.settings") as mock_settings:
+        with patch("src.core.workflow.app_config") as mock_settings:
             mock_settings.duplicate_detection_enabled = True
             mock_settings.semantic_search_enabled = True
             mock_settings.similarity_threshold = 0.85
@@ -274,10 +273,10 @@ class TestDuplicateDetectionInteraction:
         wf = _make_workflow(pg_client)
         wf.embedding_model.aembed_query = AsyncMock(return_value=EMBED_MATCH)
 
-        wf.llm_chat.invoke = MagicMock(
+        wf.llm_chat.ainvoke = AsyncMock(
             return_value=ChatResponse(response="Ready.", is_ready=True)
         )
-        wf.llm_extract.invoke = MagicMock(
+        wf.llm_extract.ainvoke = AsyncMock(
             return_value=ExtractedRequest(
                 request_type="infrastructure-provisioning",
                 name="New User",
@@ -303,7 +302,7 @@ class TestDuplicateDetectionInteraction:
 
         checkpointer = InMemorySaver()
 
-        with patch("src.core.workflow.settings") as mock_settings:
+        with patch("src.core.workflow.app_config") as mock_settings:
             mock_settings.duplicate_detection_enabled = True
             mock_settings.semantic_search_enabled = True
             mock_settings.similarity_threshold = 0.85
@@ -320,7 +319,7 @@ class TestDuplicateDetectionInteraction:
             )
 
             # Turn 2: user sends "proceed"
-            result = await app.ainvoke(
+            await app.ainvoke(
                 {"messages": [HumanMessage(content="proceed")]},
                 config={"configurable": {"thread_id": "thread-proceed"}},
             )
@@ -346,7 +345,7 @@ class TestSessionPersistenceInMemory:
         """
         wf = _make_workflow(pg_client)
         # Not ready yet — keep the conversation going
-        wf.llm_chat.invoke = MagicMock(
+        wf.llm_chat.ainvoke = AsyncMock(
             return_value=ChatResponse(
                 response="What environment?", is_ready=False
             )
@@ -378,7 +377,7 @@ class TestSessionPersistenceInMemory:
     async def test_different_thread_ids_are_isolated(self, pg_client, clean_db):
         """Two different thread_ids must produce independent state."""
         wf = _make_workflow(pg_client)
-        wf.llm_chat.invoke = MagicMock(
+        wf.llm_chat.ainvoke = AsyncMock(
             return_value=ChatResponse(response="ok", is_ready=False)
         )
 

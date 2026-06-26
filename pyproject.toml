@@ -18,7 +18,6 @@ dependencies = [
     "redis>=5.2.0",
     # AI & ML
     "openai>=1.54.4",
-    "scikit-learn>=1.5.2",  # For fallback cosine similarity
     # Configuration & Environment
     "pydantic>=2.10.2",
     "pydantic-settings>=2.6.1",
@@ -30,7 +29,6 @@ dependencies = [
     "langgraph-checkpoint>=4.1.1",
     "langgraph-checkpoint-redis>=0.4.1",
     "gunicorn>=26.0.0",
-    "numpy>=2.4.6",
 ]
 
 [project.optional-dependencies]
@@ -52,6 +50,12 @@ dev = [
 
     # Pre-commit hooks
     "pre-commit>=4.0.1",
+
+    # Optional local cosine-similarity fallback (used when
+    # vector_search_provider=local or pgvector is unavailable).
+    # Not included in the production image — saves ~58 MB.
+    "numpy>=2.4.6",
+    "scikit-learn>=1.5.2",
 ]
 
 [build-system]

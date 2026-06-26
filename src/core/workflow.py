@@ -1,13 +1,16 @@
 """LangGraph workflow for conversational data collection."""
 
 import logging
-from typing import Any, Dict, List
+from typing import Any
 
 from langchain_core.messages import AIMessage, SystemMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, StateGraph
 
-from src.config.settings import app_config, prompt_config, settings
+from src.config.settings import (
+    app_config,
+    prompt_config,
+)
 from src.core.database import (
     PostgreSQLClient,
     find_fuzzy_candidates,
@@ -40,43 +43,43 @@ class ConversationWorkflow:
     def __init__(self, pg_client: PostgreSQLClient) -> None:
         """Initialize the workflow with database clients."""
         self.pg_client = pg_client
-        
+
         self.llm = get_llm()
         self.embedding_model = get_embedding_model()
-        
+
         # Create structured LLMs once at initialization (performance optimization)
         self.llm_chat = self.llm.with_structured_output(ChatResponse)
         self.llm_extract = self.llm.with_structured_output(ExtractedRequest)
         self.llm_duplicate_judge = self.llm.with_structured_output(DuplicateJudgement)
         self.llm_duplicate_decision = self.llm.with_structured_output(DuplicateDecision)
-        
+
         self.app = None
 
-    async def chat_node(self, state: ConversationState) -> Dict[str, Any]:
+    async def chat_node(self, state: ConversationState) -> dict[str, Any]:
         """
         Continue conversation with structured output.
-        
+
         LLM decides when all information is collected via is_ready flag.
         No extraction happens here - just conversation.
         """
         logger.info("Chat node: Processing user message")
-        
+
         # Add system prompt if not present
         messages = state["messages"]
         if not any(isinstance(msg, SystemMessage) for msg in messages):
             messages = [SystemMessage(content=prompt_config.system_prompt)] + messages
-        
+
         # Get structured chat response (using pre-created structured LLM)
-        result = self.llm_chat.invoke(messages)
-        
+        result = await self.llm_chat.ainvoke(messages)
+
         logger.info(f"Chat response: is_ready={result.is_ready}")
-        
+
         return {
             "messages": [AIMessage(content=result.response)],
             "is_ready": result.is_ready,
         }
 
-    async def extract_node(self, state: ConversationState) -> Dict[str, Any]:
+    async def extract_node(self, state: ConversationState) -> dict[str, Any]:
         """
         Extract structured data from the conversation.
 
@@ -94,7 +97,7 @@ class ConversationWorkflow:
             messages = [SystemMessage(content=prompt_config.system_prompt)] + messages
 
         try:
-            extracted = self.llm_extract.invoke(messages)
+            extracted = await self.llm_extract.ainvoke(messages)
             # Flatten into a single dict: request_type + everything else
             data = extracted_to_dict(extracted)
 
@@ -123,119 +126,70 @@ class ConversationWorkflow:
                 "is_complete": False,
             }
 
-    async def duplicate_check_node(self, state: ConversationState) -> Dict[str, Any]:
+    async def _vector_search_stage(
+        self,
+        collected_data: dict[str, Any],
+        candidate_ids: list[str],
+    ) -> list[dict[str, Any]]:
         """
-        Two-stage duplicate detection: fuzzy pre-filter → vector search.
+        Stage 2 — vector similarity search scoped to candidates.
 
-        Stage 1 — Fuzzy pre-filter (pg_trgm)
-            Match request_type and target_environment with trigram
-            similarity to build a candidate set. Catches typos /
-            minor variations without scanning the full table.
-            Returns only row IDs (no PII).
-
-        Stage 2 — Vector search on candidates only
-            Run cosine similarity exclusively against the candidate
-            IDs from Stage 1, so unrelated request types are never
-            compared. If the candidate set is empty, Stage 2 is
-            skipped entirely — no duplicates are possible.
-
-        Stage 3 — LLM semantic judge
-            For each candidate that passed the vector threshold, ask
-            the LLM whether it is a *true* duplicate of the new request
-            by comparing non-PII fields side-by-side.  This eliminates
-            false positives where vector similarity is high but a
-            meaningful field differs (e.g. development vs production).
-            Only records the LLM confirms as duplicates reach the user.
+        Returns the list of similar rows, or an empty list if semantic
+        search is disabled or no text content is available.
         """
-        if not app_config.duplicate_detection_enabled:
-            logger.info("Duplicate detection disabled")
-            return {}
-
-        collected_data = state.get("collected_data")
-        if not collected_data:
-            logger.warning(
-                "duplicate_check_node: no collected_data in state"
-            )
-            return {}
-
-        logger.info(
-            "Duplicate check: starting fuzzy → vector pipeline"
-        )
-
-        request_type = collected_data.get("request_type", "")
-
-        # STAGE 1: fuzzy pre-filter — build candidate set
-        logger.info(
-            "Stage 1: fuzzy pre-filter on "
-            "request_type + target_environment..."
-        )
-        candidate_ids = await find_fuzzy_candidates(
-            pg_client=self.pg_client,
-            request_type=request_type,
-            lookback_days=app_config.lookback_days,
-            fuzzy_threshold=app_config.fuzzy_threshold,
-            limit=app_config.candidate_limit,
-        )
-
-        if not candidate_ids:
-            logger.info(
-                "Stage 1: no fuzzy candidates — "
-                "skipping vector search"
-            )
-            return {}
-
-        similar: List[Dict[str, Any]] = []
-
-        # STAGE 2: vector search scoped to candidates
-        if app_config.semantic_search_enabled:
-            logger.info(
-                f"Stage 2: vector search over "
-                f"{len(candidate_ids)} candidate(s)..."
-            )
-
-            text_content = " ".join(
-                str(collected_data[f])
-                for f in get_text_fields(collected_data)
-            )
-
-            if not text_content.strip():
-                logger.warning("No text content for embedding")
-                return {}
-
-            embedding_result = (
-                await self.embedding_model.aembed_query(
-                    text_content
-                )
-            )
-
-            similar = await find_similar_requests(
-                pg_client=self.pg_client,
-                embedding=embedding_result,
-                candidate_ids=candidate_ids,
-                threshold=app_config.similarity_threshold,
-            )
-        else:
+        if not app_config.semantic_search_enabled:
             logger.info(
                 "Stage 2: semantic search disabled, skipping"
             )
+            return []
 
-        if not similar:
-            logger.info("No duplicates found")
-            return {}
+        logger.info(
+            f"Stage 2: vector search over "
+            f"{len(candidate_ids)} candidate(s)..."
+        )
 
-        # STAGE 3: LLM semantic judge — filter out false positives
-        # Only non-PII fields are sent; no privacy concern.
+        text_content = " ".join(
+            str(collected_data[f])
+            for f in get_text_fields(collected_data)
+        )
+
+        if not text_content.strip():
+            logger.warning("No text content for embedding")
+            return []
+
+        embedding_result = await self.embedding_model.aembed_query(
+            text_content
+        )
+
+        return await find_similar_requests(
+            pg_client=self.pg_client,
+            embedding=embedding_result,
+            candidate_ids=candidate_ids,
+            threshold=app_config.similarity_threshold,
+        )
+
+    async def _llm_judge_stage(
+        self,
+        similar: list[dict[str, Any]],
+        collected_data: dict[str, Any],
+        pii_fields: set[str],
+    ) -> list[dict[str, Any]]:
+        """
+        Stage 3 — LLM semantic judge to filter out false positives.
+
+        Only non-PII fields are sent; no privacy concern.
+        Returns only the confirmed duplicates.
+        """
         logger.info(
             f"Stage 3: LLM judge evaluating "
             f"{len(similar)} vector candidate(s)..."
         )
-        pii_fields = set(app_config.pii_fields)
         new_non_pii = {
             k: v for k, v in collected_data.items()
             if k not in pii_fields
         }
 
-        confirmed: List[Dict[str, Any]] = []
+        confirmed: list[dict[str, Any]] = []
         for req in similar:
             candidate_non_pii = {
                 k: v
@@ -266,60 +220,125 @@ class ConversationWorkflow:
                     "treating as non-duplicate to avoid false positive"
                 )
 
-        similar = confirmed
+        return confirmed
 
-        if similar:
+    async def duplicate_check_node(self, state: ConversationState) -> dict[str, Any]:
+        """
+        Three-stage duplicate detection pipeline.
+
+        Stage 1 — Fuzzy pre-filter (pg_trgm): builds a candidate set
+            by matching request_type with trigram similarity.
+            Returns only row IDs — no PII fetched.
+
+        Stage 2 — Vector search on candidates only (_vector_search_stage):
+            Cosine similarity scoped to the Stage-1 candidate IDs.
+            Skipped entirely when the candidate set is empty.
+
+        Stage 3 — LLM semantic judge (_llm_judge_stage):
+            Confirms or clears each vector candidate.  False positives
+            (high similarity but different intent) are discarded here.
+        """
+        if not app_config.duplicate_detection_enabled:
+            logger.info("Duplicate detection disabled")
+            return {}
+
+        collected_data = state.get("collected_data")
+        if not collected_data:
+            logger.warning(
+                "duplicate_check_node: no collected_data in state"
+            )
+            return {}
+
+        logger.info(
+            "Duplicate check: starting fuzzy → vector pipeline"
+        )
+
+        # STAGE 1: fuzzy pre-filter — build candidate set
+        logger.info(
+            "Stage 1: fuzzy pre-filter on request_type..."
+        )
+        candidate_ids = await find_fuzzy_candidates(
+            pg_client=self.pg_client,
+            request_type=collected_data.get("request_type", ""),
+            lookback_days=app_config.lookback_days,
+            fuzzy_threshold=app_config.fuzzy_threshold,
+            limit=app_config.candidate_limit,
+        )
+
+        if not candidate_ids:
             logger.info(
-                f"Stage 3: {len(similar)} confirmed duplicate(s) "
-                f"after LLM judgement"
+                "Stage 1: no fuzzy candidates — skipping vector search"
             )
+            return {}
 
-            warnings = []
-            for req in similar:
-                non_pii_data = {
-                    k: v
-                    for k, v in req.get("data", {}).items()
-                    if k not in pii_fields
-                }
-                warnings.append({
-                    "id": str(req.get("_id")),
-                    "similarity_score": req.get(
-                        "similarity_score", 0
-                    ),
-                    "created_at": str(req.get("created_at")),
-                    "config_version": req.get("config_version"),
-                    "data": non_pii_data,
-                })
+        # STAGE 2: vector search
+        similar = await self._vector_search_stage(
+            collected_data, candidate_ids
+        )
 
-            duplicate_msg = AIMessage(
-                content=(
-                    f"⚠️ I found {len(similar)} request(s) that "
-                    f"look similar to yours.\n\n"
-                    f"This is not an exact match — it just means "
-                    f"something close was submitted before. "
-                    f"If your request is genuinely different "
-                    f"(e.g. a different environment, system, or "
-                    f"date), that's fine — just choose **proceed**.\n\n"
-                    f"What would you like to do?\n"
-                    f"• **proceed** — yes, my request is different, "
-                    f"save it\n"
-                    f"• **modify** — let me change something first\n"
-                    f"• **cancel** — abandon this request\n\n"
-                    f"Reply with 'proceed', 'modify', or 'cancel'."
-                )
+        if not similar:
+            logger.info("No duplicates found after vector search")
+            return {}
+
+        # STAGE 3: LLM semantic judge
+        pii_fields = set(app_config.pii_fields)
+        confirmed = await self._llm_judge_stage(
+            similar, collected_data, pii_fields
+        )
+
+        if not confirmed:
+            logger.info(
+                "Stage 3: all candidates cleared by LLM judge — "
+                "no duplicates"
             )
+            return {}
 
-            return {
-                "duplicate_warning": warnings,
-                "messages": [duplicate_msg],
-                "awaiting_duplicate_decision": True,
-                "is_complete": False,
+        logger.info(
+            f"Stage 3: {len(confirmed)} confirmed duplicate(s) "
+            f"after LLM judgement"
+        )
+
+        warnings = []
+        for req in confirmed:
+            non_pii_data = {
+                k: v
+                for k, v in req.get("data", {}).items()
+                if k not in pii_fields
             }
+            warnings.append({
+                "id": str(req.get("_id")),
+                "similarity_score": req.get("similarity_score", 0),
+                "created_at": str(req.get("created_at")),
+                "config_version": req.get("config_version"),
+                "data": non_pii_data,
+            })
 
-        logger.info("Stage 3: all candidates cleared by LLM judge — no duplicates")
-        return {}
+        duplicate_msg = AIMessage(
+            content=(
+                f"⚠️ I found {len(confirmed)} request(s) that "
+                f"look similar to yours.\n\n"
+                f"This is not an exact match — it just means "
+                f"something close was submitted before. "
+                f"If your request is genuinely different "
+                f"(e.g. a different environment, system, or "
+                f"date), that's fine — just choose **proceed**.\n\n"
+                f"What would you like to do?\n"
+                f"• **proceed** — yes, my request is different, "
+                f"save it\n"
+                f"• **modify** — let me change something first\n"
+                f"• **cancel** — abandon this request\n\n"
+                f"Reply with 'proceed', 'modify', or 'cancel'."
+            )
+        )
 
-    async def handle_duplicate_decision_node(self, state: ConversationState) -> Dict[str, Any]:
+        return {
+            "duplicate_warning": warnings,
+            "messages": [duplicate_msg],
+            "awaiting_duplicate_decision": True,
+            "is_complete": False,
+        }
+
+    async def handle_duplicate_decision_node(self, state: ConversationState) -> dict[str, Any]:
         """
         Handle user's decision when a duplicate is detected.
 
@@ -436,7 +455,7 @@ class ConversationWorkflow:
                 )],
             }
 
-    async def save_node(self, state: ConversationState) -> Dict[str, Any]:
+    async def save_node(self, state: ConversationState) -> dict[str, Any]:
         """
         Save the collected data as a new request in PostgreSQL.
 
@@ -509,7 +528,7 @@ class ConversationWorkflow:
         if state.get("duplicate_warning") and state.get("awaiting_duplicate_decision"):
             return END
         return "save"
-    
+
     def after_duplicate_decision(self, state: ConversationState) -> str:
         """
         Routing after duplicate decision is made.
@@ -531,13 +550,13 @@ class ConversationWorkflow:
     def route_entry(self, state: ConversationState) -> str:
         """
         Entry point routing.
-        
+
         Routes to appropriate node based on state.
         """
         # If we're waiting for duplicate decision, route to handler
         if state.get("awaiting_duplicate_decision"):
             return "handle_duplicate_decision"
-        
+
         # Otherwise, normal chat flow
         return "chat"
 
@@ -620,25 +639,25 @@ class ConversationWorkflow:
     def compile(self, checkpointer: BaseCheckpointSaver):
         """
         Compile the workflow with the provided checkpointer.
-        
+
         Args:
             checkpointer: LangGraph checkpointer (e.g., RedisSaver, InMemorySaver)
-        
+
         Returns:
             Compiled LangGraph application
         """
         # Build and compile workflow
         graph = self.build_graph()
         self.app = graph.compile(checkpointer=checkpointer)
-        
+
         logger.info(f"LangGraph workflow compiled with {type(checkpointer).__name__}")
-        
+
         return self.app
 
     def get_app(self):
         """
         Get the compiled application.
-        
+
         Raises:
             RuntimeError: If app hasn't been compiled yet
         """

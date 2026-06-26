@@ -1,11 +1,9 @@
 """Unit tests for FastAPI endpoints (src/api/main.py)."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
-from httpx import AsyncClient, ASGITransport
-
 
 # ---------------------------------------------------------------------------
 # App fixture — patches lifespan so no real DB/Redis is needed
@@ -262,7 +260,7 @@ class TestHealthEndpoint:
         assert resp.status_code == 200
         body = resp.json()
         assert "status" in body
-        assert "mongodb" in body
+        assert "postgresql" in body
         assert "redis" in body
 
     def test_health_shows_disconnected_on_pg_failure(self, client):
@@ -282,7 +280,7 @@ class TestHealthEndpoint:
 
         assert resp.status_code == 200
         body = resp.json()
-        assert body["mongodb"] == "disconnected"
+        assert body["postgresql"] == "disconnected"
 
     def test_health_shows_redis_connected_when_checkpointer_enabled(self, client):
         tc, _ = client

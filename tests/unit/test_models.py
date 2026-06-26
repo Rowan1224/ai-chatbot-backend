@@ -6,8 +6,8 @@ from pydantic import ValidationError
 from src.api.models import (
     ChatRequest,
     ChatResponse,
-    SessionResponse,
     HealthResponse,
+    SessionResponse,
 )
 
 
@@ -27,11 +27,21 @@ class TestChatRequest:
         with pytest.raises(ValidationError):
             ChatRequest(session_id="sess-1")  # type: ignore[call-arg]
 
-    def test_empty_strings_are_valid(self):
-        """Pydantic allows empty strings by default."""
-        req = ChatRequest(session_id="", message="")
-        assert req.session_id == ""
-        assert req.message == ""
+    def test_empty_session_id_raises(self):
+        """session_id min_length=1 — empty string must be rejected."""
+        with pytest.raises(ValidationError):
+            ChatRequest(session_id="", message="hello")
+
+    def test_invalid_session_id_chars_raises(self):
+        """session_id rejects path-traversal characters."""
+        with pytest.raises(ValidationError):
+            ChatRequest(session_id="../admin", message="hello")
+
+    def test_valid_session_id_formats(self):
+        """session_id accepts UUIDs, prefixed IDs, and simple slugs."""
+        for sid in ["e2e-abc123", "sess_001", "a1B2c3"]:
+            req = ChatRequest(session_id=sid, message="hi")
+            assert req.session_id == sid
 
 
 class TestChatResponseModel:
@@ -93,24 +103,32 @@ class TestHealthResponse:
     """Tests for HealthResponse model."""
 
     def test_healthy_response(self):
-        resp = HealthResponse(status="healthy", mongodb="connected", redis="connected")
+        resp = HealthResponse(
+            status="healthy", postgresql="connected", redis="connected"
+        )
         assert resp.status == "healthy"
-        assert resp.mongodb == "connected"
+        assert resp.postgresql == "connected"
         assert resp.redis == "connected"
 
     def test_unhealthy_response(self):
         resp = HealthResponse(
-            status="unhealthy", mongodb="disconnected", redis="disabled (dev mode)"
+            status="unhealthy",
+            postgresql="disconnected",
+            redis="disabled (dev mode)",
         )
         assert resp.status == "unhealthy"
 
     def test_missing_fields_raises(self):
         with pytest.raises(ValidationError):
-            HealthResponse(status="healthy", mongodb="connected")  # type: ignore[call-arg]
+            HealthResponse(  # type: ignore[call-arg]
+                status="healthy", postgresql="connected"
+            )
 
     def test_serialisation_round_trip(self):
         """Model can be serialised to dict and reconstructed."""
-        original = HealthResponse(status="healthy", mongodb="connected", redis="connected")
+        original = HealthResponse(
+            status="healthy", postgresql="connected", redis="connected"
+        )
         data = original.model_dump()
         reconstructed = HealthResponse(**data)
         assert reconstructed == original

@@ -12,7 +12,7 @@
 # The provider (openai / azure / anthropic) is set in .env because it
 # determines which credentials are required.
 llm:
-  chat_model: "gpt-4"
+  chat_model: "o4-mini"
   embedding_model: "text-embedding-3-small"
 
 # Duplicate detection behaviour and tuning knobs
@@ -37,6 +37,13 @@ privacy:
   pii_fields:
     - name
     - employee_id
+
+# Rate limiting — applied per session_id on POST /chat
+# Prevents a single session from triggering unbounded LLM calls.
+rate_limiting:
+  # Maximum requests per session per 60-second sliding window
+  # Set to 0 to disable rate limiting entirely.
+  requests_per_minute: 30
 
 # CORS — list the exact origins your frontend is served from.
 # An empty list means no browser cross-origin requests are allowed.

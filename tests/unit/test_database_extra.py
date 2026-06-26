@@ -13,7 +13,6 @@ from src.core.database import (
     _row_to_dict,
 )
 
-
 # ---------------------------------------------------------------------------
 # PostgreSQLClient — close and ping
 # ---------------------------------------------------------------------------
@@ -291,37 +290,6 @@ class TestFindSimilarRequestsLocalFallback:
             )
 
         assert result == []
-
-
-# ---------------------------------------------------------------------------
-# update_request — exception branch
-# ---------------------------------------------------------------------------
-
-
-class TestUpdateRequestExceptionBranch:
-    @pytest.mark.asyncio
-    async def test_update_request_returns_false_on_exception(self):
-        from src.core.database import update_request
-
-        client = MagicMock(spec=["pool"])
-        conn = AsyncMock()
-
-        acquire_ctx = MagicMock()
-        acquire_ctx.__aenter__ = AsyncMock(return_value=conn)
-        acquire_ctx.__aexit__ = AsyncMock(return_value=False)
-        client.pool = MagicMock()
-        client.pool.acquire.return_value = acquire_ctx
-
-        conn.execute = AsyncMock(side_effect=RuntimeError("db error"))
-
-        result = await update_request(
-            pg_client=client,
-            request_id=str(uuid.uuid4()),
-            data={"request_type": "infra"},
-            embedding=[0.1] * 1536,
-        )
-
-        assert result is False
 
 
 # Made with Bob

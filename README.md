@@ -12,6 +12,15 @@ A conversational API that collects structured service desk requests through natu
 
 ## Quick start
 
+**Option A — full Docker stack (no local Python required):**
+
+```bash
+./scripts/setup-local-env.sh
+docker compose up -d
+```
+
+**Option B — local API with hot reload (for development):**
+
 ```bash
 uv sync
 ./scripts/setup-local-env.sh
@@ -20,6 +29,29 @@ uv run uvicorn src.api.main:app --reload
 ```
 
 Then open `http://localhost:8000/docs`.
+
+### Try it interactively
+
+Once the API is running (either option), use the interactive test REPL to chat with the bot from your terminal:
+
+```bash
+./scripts/interactive_test.sh
+```
+
+Commands inside the REPL:
+
+| Input | Action |
+|---|---|
+| Any text | Send a message to the bot |
+| `health` | Check API health |
+| `state` | Show current session state |
+| `quit` / `exit` | End the session |
+
+The session ID is auto-generated on each run. Override the defaults with env vars if needed:
+
+```bash
+API_URL=http://localhost:8000 API_KEY=your-key ./scripts/interactive_test.sh
+```
 
 ## Tests
 

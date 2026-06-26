@@ -30,7 +30,6 @@ Set DOCKER_HOST to your Podman socket before running, e.g.:
 Or set PODMAN_SOCKET_PATH and this conftest will detect it automatically.
 """
 
-import asyncio
 import os
 
 import pytest
@@ -39,7 +38,7 @@ from testcontainers.postgres import PostgresContainer
 from testcontainers.redis import RedisContainer
 
 import src.config.settings as _settings_mod
-from src.core.database import PostgreSQLClient, RedisClient
+from src.core.database import PostgreSQLClient
 
 # ---------------------------------------------------------------------------
 # Podman / Docker socket auto-detection

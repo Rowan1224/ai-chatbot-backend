@@ -4,8 +4,6 @@ Integration tests for PostgreSQLClient — real pgvector/pgvector:pg16 container
 Verifies:
 - Schema bootstrap creates the required table and extensions
 - save_request persists a row with correct JSON data and embedding
-- update_request modifies the row and sets updated_at
-- update_request returns False for unknown IDs
 - ping returns True on a live connection
 """
 
@@ -13,10 +11,8 @@ import json
 import uuid
 
 import pytest
-import pytest_asyncio
 
-from src.core.database import PostgreSQLClient, save_request, update_request
-
+from src.core.database import save_request
 
 pytestmark = pytest.mark.integration
 
@@ -175,70 +171,6 @@ class TestSaveRequest:
             )
 
         assert created_at is not None
-
-
-# ---------------------------------------------------------------------------
-# update_request
-# ---------------------------------------------------------------------------
-
-
-class TestUpdateRequest:
-    """update_request modifies an existing row."""
-
-    @pytest.mark.asyncio
-    async def test_returns_true_when_row_updated(self, pg_client, clean_db):
-        """update_request returns True when the row exists and is updated."""
-        data = {"request_type": "access-grant", "name": "Frank", "employee_id": "EMP006"}
-        request_id = await save_request(pg_client, data, EMBEDDING)
-
-        updated_data = {**data, "target_environment": "production"}
-        result = await update_request(pg_client, request_id, updated_data, EMBEDDING_ALT)
-
-        assert result is True
-
-    @pytest.mark.asyncio
-    async def test_data_is_changed_after_update(self, pg_client, clean_db):
-        """The updated data must be reflected when the row is re-read."""
-        data = {"request_type": "pipeline-change", "name": "Gina", "employee_id": "EMP007"}
-        request_id = await save_request(pg_client, data, EMBEDDING)
-
-        updated_data = {**data, "business_justification": "Updated reason"}
-        await update_request(pg_client, request_id, updated_data, EMBEDDING_ALT)
-
-        async with pg_client.pool.acquire() as conn:
-            raw = await conn.fetchval(
-                "SELECT data FROM requests WHERE id = $1",
-                uuid.UUID(request_id),
-            )
-
-        stored = json.loads(raw) if isinstance(raw, str) else raw
-        assert stored.get("business_justification") == "Updated reason"
-
-    @pytest.mark.asyncio
-    async def test_updated_at_is_set_after_update(self, pg_client, clean_db):
-        """updated_at must be non-NULL after an update."""
-        data = {"request_type": "service-deployment", "name": "Hank", "employee_id": "EMP008"}
-        request_id = await save_request(pg_client, data, EMBEDDING)
-
-        await update_request(pg_client, request_id, data, EMBEDDING_ALT)
-
-        async with pg_client.pool.acquire() as conn:
-            updated_at = await conn.fetchval(
-                "SELECT updated_at FROM requests WHERE id = $1",
-                uuid.UUID(request_id),
-            )
-
-        assert updated_at is not None, "updated_at was not set after update"
-
-    @pytest.mark.asyncio
-    async def test_returns_false_for_unknown_id(self, pg_client, clean_db):
-        """update_request returns False when the UUID does not exist."""
-        missing_id = str(uuid.uuid4())
-        data = {"request_type": "access-grant", "name": "Ian", "employee_id": "EMP009"}
-
-        result = await update_request(pg_client, missing_id, data, EMBEDDING)
-
-        assert result is False
 
 
 # ---------------------------------------------------------------------------

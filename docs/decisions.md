@@ -50,3 +50,36 @@ The current pipeline scales in two directions:
 **Higher throughput** — Stage 3 LLM calls are independent per candidate and can be parallelised with `asyncio.gather`. The current implementation is sequential because the candidate count is typically small (≤5 after Stage 2 filtering). If that changes, parallelising is a one-function change in `duplicate_check_node`.
 
 **Tuning without code changes** — all thresholds (`similarity_threshold`, `fuzzy_threshold`, `lookback_days`, `candidate_limit`) live in `app_config.yaml`. Tighten or loosen them and restart.
+
+## Secrets management: environment variables vs Docker secrets
+
+The app currently reads all credentials via environment variables (`pydantic-settings` with `env_file=".env"`). Docker/Podman secrets (files mounted under `/run/secrets/`) were considered as an alternative.
+
+**Why env vars are the right default here:**
+
+- GitHub Actions and Azure Pipelines — the documented CI/CD targets — manage secrets securely and inject them as environment variables. They do not write to files.
+- Env vars are the universal lowest-common-denominator: they work identically in local dev, CI runners, VMs, Swarm, and Kubernetes without any infrastructure-specific code.
+- The real env-var exposure risk (`docker inspect` leaking `Config.Env`) is mitigated by restricting Docker socket access on the host — standard practice on hardened CI runners and production VMs.
+
+**When Docker / Kubernetes secrets are the better choice:**
+
+- **Docker Swarm**: Docker secrets are the idiomatic approach. Values are never stored in `Config.Env` and are only mounted into containers that explicitly declare them.
+- **Kubernetes**: Secrets can be projected as files or injected via `envFrom`. File-based projection avoids env-var visibility entirely.
+- **High-compliance environments** where `docker inspect` access cannot be restricted, or where audit requirements mandate secrets never appear in process environment.
+
+**How to adopt file-based secrets with zero application code changes:**
+
+`pydantic-settings` natively reads from a secrets directory. Adding `secrets_dir` to [`Settings`](../src/config/settings.py) is the only change needed:
+
+```python
+model_config = SettingsConfigDict(
+    env_file=".env",
+    env_file_encoding="utf-8",
+    secrets_dir="/run/secrets",   # reads /run/secrets/openai_api_key, etc.
+    extra="ignore",
+)
+```
+
+`pydantic-settings` checks environment variables first and falls back to the secrets directory, so both mechanisms work simultaneously. This makes the migration to Swarm or Kubernetes a infrastructure change only — no Python changes required.
+
+---

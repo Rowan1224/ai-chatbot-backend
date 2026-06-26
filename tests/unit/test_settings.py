@@ -1,7 +1,8 @@
 """Unit tests for settings.py — Settings validators, PromptConfig, and AppConfig."""
 
+from unittest.mock import mock_open, patch
+
 import pytest
-from unittest.mock import patch, mock_open
 import yaml
 
 
@@ -24,6 +25,7 @@ class TestSettingsValidation:
                 clear=False,
             ):
                 import importlib
+
                 import src.config.settings as settings_mod
                 importlib.reload(settings_mod)
 
@@ -45,6 +47,7 @@ class TestSettingsValidation:
                 clear=False,
             ):
                 import importlib
+
                 import src.config.settings as settings_mod
                 importlib.reload(settings_mod)
 
@@ -62,6 +65,7 @@ class TestSettingsValidation:
                 clear=False,
             ):
                 import importlib
+
                 import src.config.settings as settings_mod
                 importlib.reload(settings_mod)
 
@@ -78,6 +82,7 @@ class TestSettingsValidation:
                 clear=False,
             ):
                 import importlib
+
                 import src.config.settings as settings_mod
                 importlib.reload(settings_mod)
 
@@ -88,6 +93,7 @@ class TestSettingsValidator:
     def test_openai_missing_key_raises_value_error(self):
         """Validator raises when provider=openai and key is None."""
         from pydantic import ValidationError
+
         from src.config.settings import Settings
 
         with pytest.raises((ValidationError, ValueError)):
@@ -100,6 +106,7 @@ class TestSettingsValidator:
 
     def test_azure_missing_key_raises_value_error(self):
         from pydantic import ValidationError
+
         from src.config.settings import Settings
 
         with pytest.raises((ValidationError, ValueError)):
@@ -113,6 +120,7 @@ class TestSettingsValidator:
 
     def test_azure_missing_endpoint_raises_value_error(self):
         from pydantic import ValidationError
+
         from src.config.settings import Settings
 
         with pytest.raises((ValidationError, ValueError)):
@@ -126,6 +134,7 @@ class TestSettingsValidator:
 
     def test_anthropic_missing_key_raises_value_error(self):
         from pydantic import ValidationError
+
         from src.config.settings import Settings
 
         with pytest.raises((ValidationError, ValueError)):
@@ -138,6 +147,7 @@ class TestSettingsValidator:
 
     def test_invalid_provider_raises_value_error(self):
         from pydantic import ValidationError
+
         from src.config.settings import Settings
 
         with pytest.raises((ValidationError, ValueError)):
