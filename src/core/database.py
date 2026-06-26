@@ -10,7 +10,7 @@ import asyncpg
 from pgvector.asyncpg import register_vector
 from redis.asyncio import Redis
 
-from src.config.settings import settings
+from src.config.settings import app_config, prompt_config, settings
 
 logger = logging.getLogger(__name__)
 
@@ -131,8 +131,6 @@ async def save_request(
     Returns:
         Inserted row UUID as string
     """
-    from src.config.settings import prompt_config
-
     async with pg_client.pool.acquire() as conn:
         row_id = await conn.fetchval(
             """
@@ -170,8 +168,6 @@ async def update_request(
     Returns:
         True if a row was updated, False if not found
     """
-    from src.config.settings import prompt_config
-
     try:
         async with pg_client.pool.acquire() as conn:
             result = await conn.execute(
@@ -284,7 +280,7 @@ async def find_similar_requests(
     if not candidate_ids:
         return []
 
-    if settings.vector_search_provider == "pgvector":
+    if app_config.vector_search_provider == "pgvector":
         try:
             return await _pgvector_search(
                 pg_client, embedding,
@@ -295,7 +291,7 @@ async def find_similar_requests(
                 f"pgvector search failed: {e}, "
                 "falling back to local similarity"
             )
-            if settings.duplicate_detection_enabled:
+            if app_config.duplicate_detection_enabled:
                 return await _local_similarity_search(
                     pg_client, embedding,
                     candidate_ids, threshold,

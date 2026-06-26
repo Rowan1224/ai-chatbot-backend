@@ -1,4 +1,9 @@
 #!/bin/bash
+# interactive_test.sh — interactive API test REPL
+# Run from anywhere: scripts/interactive_test.sh
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}/.."
 
 # Interactive API Test Script for AI Chatbot Backend
 # Allows you to chat with the bot interactively

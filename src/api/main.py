@@ -1,6 +1,7 @@
 """FastAPI application for AI Chatbot Backend."""
 
 import logging
+import secrets
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Header, status
@@ -15,13 +16,13 @@ from src.api.models import (
     SessionResponse,
     HealthResponse,
 )
-from src.config.settings import settings
+from src.config.settings import app_config, settings
 from src.core.database import PostgreSQLClient, RedisClient
 from src.core.workflow import ConversationWorkflow
 
 # Configure logging
 logging.basicConfig(
-    level=settings.log_level,
+    level=app_config.log_level,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
@@ -89,12 +90,13 @@ app = FastAPI(
 )
 
 # Add CORS middleware
+# Origins are configured in app_config.yaml — set to your frontend's URL in production.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=app_config.cors_origins,
+    allow_credentials=False,
+    allow_methods=["POST", "GET"],
+    allow_headers=["Content-Type", "X-API-Key"],
 )
 
 
@@ -106,7 +108,7 @@ async def verify_api_key(x_api_key: str = Header(..., alias="X-API-Key")) -> Non
     This is a FastAPI dependency that can be injected into endpoints.
     Raises HTTPException if the API key is invalid.
     """
-    if x_api_key != settings.api_key:
+    if not secrets.compare_digest(x_api_key, settings.api_key):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API key",
@@ -179,10 +181,10 @@ async def get_session(
     Returns the full conversation state including messages and collected data.
     """
     try:
-        state = app.state.conversation_app.get_state(
+        state = await app.state.conversation_app.aget_state(
             config={"configurable": {"thread_id": session_id}}
         )
-        
+
         return SessionResponse(
             session_id=session_id,
             state=state.values,

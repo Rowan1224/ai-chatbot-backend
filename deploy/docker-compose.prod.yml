@@ -1,0 +1,55 @@
+# Production Docker Compose
+# ─────────────────────────────────────────────────────────────────────────────
+# Secrets and infrastructure URLs are injected by the CI/CD pipeline as shell
+# environment variables — no .env file is used or expected on the server.
+#
+# Usage (CI/CD pipeline):
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# The pipeline must export all ${VAR} values before running this.
+# PostgreSQL and Redis are external managed services in production — they are
+# not started here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  api:
+    image: ${IMAGE_NAME:-ai-chatbot-api}:${IMAGE_TAG:-latest}
+    container_name: ai-chatbot-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # LLM provider and credentials
+      - LLM_PROVIDER=${LLM_PROVIDER}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY:-}
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT:-}
+      - OPENAI_API_VERSION=${OPENAI_API_VERSION:-2024-12-01-preview}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Observability
+      - LANGSMITH_TRACING=${LANGSMITH_TRACING:-false}
+      - LANGSMITH_ENDPOINT=${LANGSMITH_ENDPOINT:-}
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY:-}
+      - LANGSMITH_PROJECT=${LANGSMITH_PROJECT:-default}
+      # Infrastructure
+      - POSTGRESQL_URL=${POSTGRESQL_URL}
+      - REDIS_URL=${REDIS_URL}
+      - USE_REDIS_CHECKPOINTER=true
+      # API
+      - API_KEY=${API_KEY}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+# Made with Bob

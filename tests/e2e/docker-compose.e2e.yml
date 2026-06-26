@@ -1,0 +1,78 @@
+# Docker Compose override for E2E tests.
+#
+# Usage (from ai-chatbot-backend/):
+#   docker compose -f docker-compose.yml \
+#                  -f tests/e2e/docker-compose.e2e.yml \
+#                  up --build -d
+#
+# What this override does
+# -----------------------
+# 1. Mounts tests/e2e/ into the container at /app/tests/e2e/ so
+#    Gunicorn can import tests.e2e.app_override (the patching shim).
+#
+# 2. Changes the Gunicorn command to use tests.e2e.app_override:app
+#    instead of src.api.main:app.  app_override patches get_llm /
+#    get_embedding_model with mock implementations before the real
+#    app is imported — no production code is modified.
+#
+# 3. Sets all required env vars for the container (no .env file
+#    needed so E2E works in clean CI environments).
+#
+# 4. Exposes port 8001 so E2E and dev stacks can run side by side.
+#
+# 5. Drops resource limits (not needed in test environments).
+
+services:
+  api:
+    ports:
+      - "8001:8000"
+    volumes:
+      # Mount the e2e test folder so app_override.py is importable
+      - ./tests/e2e:/app/tests/e2e:ro
+      # Ensure the tests package is importable (needs __init__.py)
+      - ./tests/__init__.py:/app/tests/__init__.py:ro
+    command:
+      - "gunicorn"
+      - "tests.e2e.app_override:app"
+      - "--workers"
+      - "1"
+      - "--worker-class"
+      - "uvicorn.workers.UvicornWorker"
+      - "--bind"
+      - "0.0.0.0:8000"
+      - "--timeout"
+      - "120"
+      - "--graceful-timeout"
+      - "30"
+      - "--access-logfile"
+      - "-"
+      - "--error-logfile"
+      - "-"
+    environment:
+      # Database (same as base compose, using service names)
+      - POSTGRESQL_URL=postgresql://chatbot:chatbot_password@postgres:5432/chatbot
+      - REDIS_URL=redis://redis:6379
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - USE_REDIS_CHECKPOINTER=true
+      - ENVIRONMENT=e2e
+
+      # LLM — any valid provider value; the actual LLM is patched out
+      # by app_override.py so no real key is used or checked.
+      - LLM_PROVIDER=openai
+      - OPENAI_API_KEY=e2e-placeholder-not-used
+
+      # Auth key used by the test client
+      - API_KEY=e2e-test-key
+
+      # Duplicate detection ON so the duplicate scenario works
+      - DUPLICATE_DETECTION_ENABLED=true
+      - SEMANTIC_SEARCH_ENABLED=true
+      - SIMILARITY_THRESHOLD=0.5
+
+      # Logging
+      - LOG_LEVEL=INFO
+    # Remove resource limits for test environment
+    deploy: {}
+
+# Made with Bob

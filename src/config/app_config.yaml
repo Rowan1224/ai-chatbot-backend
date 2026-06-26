@@ -1,0 +1,55 @@
+# Application Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+# Non-secret, non-prompt application behaviour.
+# Edit this file and restart the server to change models, thresholds, or
+# feature flags without touching .env.
+#
+# Secrets (API keys, DB URLs) and infrastructure (Redis, checkpointer) remain
+# in .env — they are environment-specific or sensitive.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# LLM model selection
+# The provider (openai / azure / anthropic) is set in .env because it
+# determines which credentials are required.
+llm:
+  chat_model: "gpt-4"
+  embedding_model: "text-embedding-3-small"
+
+# Duplicate detection behaviour and tuning knobs
+duplicate_detection:
+  enabled: true
+  # Stage 2: semantic (vector) similarity search
+  semantic_search_enabled: true
+  # Cosine similarity threshold (0–1) — higher = stricter match required
+  similarity_threshold: 0.85
+  # How far back to look for duplicates (days)
+  lookback_days: 90
+  # pg_trgm pre-filter threshold (0–1) — lower = wider net
+  fuzzy_threshold: 0.3
+  # Max candidates passed from fuzzy pre-filter to vector search
+  candidate_limit: 50
+  # Vector search backend: pgvector | local
+  vector_search_provider: "pgvector"
+
+# Privacy — fields never sent to the embedding model
+# request_type is intentionally excluded: it IS used for fuzzy matching.
+privacy:
+  pii_fields:
+    - name
+    - employee_id
+
+# CORS — list the exact origins your frontend is served from.
+# An empty list means no browser cross-origin requests are allowed.
+# Example for local dev + a deployed frontend:
+#   origins:
+#     - "http://localhost:3000"
+#     - "https://your-app.example.com"
+cors:
+  origins:
+    - "http://localhost:3000"
+
+# Logging
+logging:
+  level: "INFO"
+
+# Made with Bob

@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from src.config.settings import prompt_config
+from src.config.settings import app_config
 
 
 class DataField(BaseModel):
@@ -125,9 +125,7 @@ def get_text_fields(data: Dict[str, Any]) -> List[str]:
         List of key names whose values are non-empty strings
         and are not in the configured PII field list.
     """
-    pii_fields = set(
-        prompt_config.privacy.get("pii_fields", [])
-    )
+    pii_fields = set(app_config.pii_fields)
     return [
         k for k, v in data.items()
         if k not in pii_fields and isinstance(v, str) and v.strip()

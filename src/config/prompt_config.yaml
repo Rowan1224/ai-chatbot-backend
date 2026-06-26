@@ -1,6 +1,7 @@
-# AI Assistant Configuration
+# Prompt Configuration
 # ─────────────────────────────────────────────────────────────────────────────
-# Edit this file and restart the server to reconfigure the chatbot.
+# This file controls the AI assistant's identity, behaviour, and domain.
+# Replace system_prompt entirely to adapt the chatbot to a different use-case.
 #
 # HOW THE SCHEMA WORKS:
 #   The extraction schema is defined in code, not here. Three fields are always
@@ -34,7 +35,7 @@ system_prompt: |
 
   After collecting the request details, ask for:
   4. The requester's full name
-  5. The requester's employee ID (format: EMP followed by digits, e.g. EMP12345)
+  5. The requester's employee ID
 
   Conduct the conversation naturally and professionally. Ask one question at a
   time. Once you have all five pieces of information, confirm them with the user
@@ -44,21 +45,5 @@ system_prompt: |
   • Set request_type to the normalised value from the list above.
   • Set name and employee_id to what the user provided.
   • Put target_environment and business_justification in additional_data.
-
-# Duplicate detection settings
-duplicate_detection:
-  enabled: true
-  similarity_threshold: 0.85
-  lookback_days: 90
-  vector_search_provider: "pgvector"  # pgvector | local
-  fallback_enabled: true
-
-# Privacy settings
-# pii_fields lists the fields that are NEVER sent to the embedding model.
-# request_type is intentionally excluded here — it IS used for fuzzy matching.
-privacy:
-  pii_fields:
-    - name
-    - employee_id
 
 # Made with Bob

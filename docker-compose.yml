@@ -1,18 +1,4 @@
 services:
-
-  mongodb:
-    image: mongodb/mongodb-community-server:7.0-ubuntu2204
-    container_name: mongo-test
-    restart: unless-stopped
-    ports:
-      - "27017:27017"
-    environment:
-      MONGODB_INITDB_ROOT_USERNAME: admin
-      MONGODB_INITDB_ROOT_PASSWORD: password
-    volumes:
-      - mongo_data:/data/db
-    security_opt:
-      - seccomp:unconfined   # handles kernel 6.x compatibility
   # PostgreSQL + pgvector for document storage and vector search
   postgres:
     image: pgvector/pgvector:pg16
@@ -66,6 +52,7 @@ services:
       # Override specific variables for Docker environment
       - POSTGRESQL_URL=postgresql://chatbot:chatbot_password@postgres:5432/chatbot
       - REDIS_URL=redis://redis:6379
+      - REDIS_HOST=redis
       - ENVIRONMENT=production
     depends_on:
       postgres:

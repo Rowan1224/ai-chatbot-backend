@@ -1,23 +1,30 @@
 """LangGraph workflow for conversational data collection."""
 
 import logging
-import operator
-from typing import Annotated, Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List
 
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, StateGraph
-from pydantic import BaseModel, Field
 
-from src.config.settings import prompt_config, settings
+from src.config.settings import app_config, prompt_config, settings
 from src.core.database import (
     PostgreSQLClient,
-    RedisClient,
     find_fuzzy_candidates,
     find_similar_requests,
     save_request,
 )
 from src.core.llm import get_embedding_model, get_llm
+from src.core.models import (
+    ChatResponse,
+    ConversationState,
+    DuplicateDecision,
+    DuplicateJudgement,
+)
+from src.core.prompts import (
+    DUPLICATE_DECISION_PARSER_PROMPT,
+    DUPLICATE_JUDGE_PROMPT,
+)
 from src.core.schema import (
     ExtractedRequest,
     extracted_to_dict,
@@ -25,73 +32,6 @@ from src.core.schema import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-class ChatResponse(BaseModel):
-    """Structured response from chat node."""
-
-    response: str = Field(description="Bot's response message to the user")
-    is_ready: bool = Field(
-        description="True when all required information has been collected and ready to extract"
-    )
-
-
-class DuplicateJudgement(BaseModel):
-    """LLM verdict on whether a candidate record is a true duplicate."""
-
-    is_duplicate: bool = Field(
-        description=(
-            "True if the candidate request represents the same intent "
-            "as the new request — i.e. same purpose, same target, same "
-            "scope.  False if any meaningful field differs (e.g. "
-            "different environment, system, date, or access level)."
-        )
-    )
-    reasoning: str = Field(
-        description=(
-            "One sentence explaining what is the same or different "
-            "between the two requests."
-        )
-    )
-
-
-class DuplicateDecision(BaseModel):
-    """Structured response for duplicate decision."""
-
-    choice: str = Field(
-        description=(
-            "User's choice — one of:\n"
-            "  'modify'  — user wants to go back to chat and change "
-            "something in their current request\n"
-            "  'proceed' — the request is intentionally different, "
-            "save it as a new request anyway\n"
-            "  'cancel'  — abandon this request without saving"
-        )
-    )
-    reasoning: str = Field(
-        description="Brief explanation of why the user made this choice"
-    )
-
-
-class ConversationState(TypedDict, total=False):
-    """State for the conversation workflow.
-
-    ``total=False`` makes every key optional so LangGraph can build
-    the state incrementally — keys are only present once a node sets
-    them.  Nodes must use ``.get()`` with sensible defaults rather
-    than direct key access.
-    """
-
-    messages: Annotated[List[BaseMessage], operator.add]
-    collected_data: Dict[str, Any]
-    is_ready: bool
-    is_complete: bool
-    duplicate_warning: List[Dict[str, Any]]
-    config_version: str
-    awaiting_duplicate_decision: bool
-    # 'modify' | 'proceed' | 'cancel' | None — set by
-    # handle_duplicate_decision_node so the router can branch cleanly
-    duplicate_decision: Optional[str]
 
 
 class ConversationWorkflow:
@@ -207,7 +147,7 @@ class ConversationWorkflow:
             meaningful field differs (e.g. development vs production).
             Only records the LLM confirms as duplicates reach the user.
         """
-        if not settings.duplicate_detection_enabled:
+        if not app_config.duplicate_detection_enabled:
             logger.info("Duplicate detection disabled")
             return {}
 
@@ -232,9 +172,9 @@ class ConversationWorkflow:
         candidate_ids = await find_fuzzy_candidates(
             pg_client=self.pg_client,
             request_type=request_type,
-            lookback_days=settings.lookback_days,
-            fuzzy_threshold=settings.fuzzy_threshold,
-            limit=settings.candidate_limit,
+            lookback_days=app_config.lookback_days,
+            fuzzy_threshold=app_config.fuzzy_threshold,
+            limit=app_config.candidate_limit,
         )
 
         if not candidate_ids:
@@ -247,7 +187,7 @@ class ConversationWorkflow:
         similar: List[Dict[str, Any]] = []
 
         # STAGE 2: vector search scoped to candidates
-        if settings.semantic_search_enabled:
+        if app_config.semantic_search_enabled:
             logger.info(
                 f"Stage 2: vector search over "
                 f"{len(candidate_ids)} candidate(s)..."
@@ -272,7 +212,7 @@ class ConversationWorkflow:
                 pg_client=self.pg_client,
                 embedding=embedding_result,
                 candidate_ids=candidate_ids,
-                threshold=settings.similarity_threshold,
+                threshold=app_config.similarity_threshold,
             )
         else:
             logger.info(
@@ -289,7 +229,7 @@ class ConversationWorkflow:
             f"Stage 3: LLM judge evaluating "
             f"{len(similar)} vector candidate(s)..."
         )
-        pii_fields = set(prompt_config.privacy.get("pii_fields", []))
+        pii_fields = set(app_config.pii_fields)
         new_non_pii = {
             k: v for k, v in collected_data.items()
             if k not in pii_fields
@@ -303,15 +243,7 @@ class ConversationWorkflow:
                 if k not in pii_fields
             }
             judge_prompt = [
-                SystemMessage(content=(
-                    "You are a duplicate-request detector. "
-                    "Compare the two requests below and decide if they "
-                    "represent the same intent — same purpose, same "
-                    "target, same scope. "
-                    "If any meaningful field differs (e.g. different "
-                    "environment, system, date, or access level) they "
-                    "are NOT duplicates."
-                )),
+                SystemMessage(content=DUPLICATE_JUDGE_PROMPT),
                 AIMessage(content=(
                     f"NEW REQUEST:\n{new_non_pii}\n\n"
                     f"EXISTING REQUEST:\n{candidate_non_pii}"
@@ -409,20 +341,7 @@ class ConversationWorkflow:
             "Handle duplicate decision: parsing user choice"
         )
 
-        system_prompt = SystemMessage(
-            content=(
-                "You are parsing a user's response to a duplicate "
-                "request warning.  The user should choose one of:\n"
-                "  'modify'  — they want to go back to the "
-                "conversation and change something in their current "
-                "request\n"
-                "  'proceed' — their request is intentionally "
-                "different and should be saved as a new record\n"
-                "  'cancel'  — they want to abandon the request "
-                "without saving\n"
-                "Extract their choice."
-            )
-        )
+        system_prompt = SystemMessage(content=DUPLICATE_DECISION_PARSER_PROMPT)
 
         messages = [system_prompt] + state.get("messages", [])
 
