@@ -7,8 +7,8 @@
 #   docker compose -f docker-compose.prod.yml up -d
 #
 # The pipeline must export all ${VAR} values before running this.
-# PostgreSQL and Redis are external managed services in production — they are
-# not started here.
+# PostgreSQL is an external managed service in production — it is not started
+# here. LangGraph checkpointing uses AsyncPostgresSaver (same DB, no Redis).
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
@@ -33,8 +33,7 @@ services:
       - LANGSMITH_PROJECT=${LANGSMITH_PROJECT:-default}
       # Infrastructure
       - POSTGRESQL_URL=${POSTGRESQL_URL}
-      - REDIS_URL=${REDIS_URL}
-      - USE_REDIS_CHECKPOINTER=true
+      - USE_POSTGRES_CHECKPOINTER=true
       # API
       - API_KEY=${API_KEY}
     healthcheck:
@@ -52,4 +51,4 @@ services:
           cpus: '0.5'
           memory: 512M
 
-# Made with Bob
+

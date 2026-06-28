@@ -9,7 +9,6 @@ import pytest
 
 from src.core.database import (
     PostgreSQLClient,
-    RedisClient,
     find_fuzzy_candidates,
     find_similar_requests,
     save_request,
@@ -127,32 +126,6 @@ class TestPostgreSQLClient:
             mock_bootstrap.execute.assert_called_once()
             # Bootstrap conn must be closed regardless of errors
             mock_bootstrap.close.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# RedisClient
-# ---------------------------------------------------------------------------
-
-
-class TestRedisClient:
-    """Test RedisClient initialisation."""
-
-    def test_init_creates_instance(self):
-        client = RedisClient()
-        assert client is not None
-        assert client.client is None
-
-    @pytest.mark.asyncio
-    async def test_connect_sets_client(self):
-        with patch("src.core.database.Redis") as mock_redis:
-            mock_instance = MagicMock()
-            mock_instance.ping = AsyncMock(return_value=True)
-            mock_redis.return_value = mock_instance
-
-            client = RedisClient()
-            await client.connect()
-
-            assert client.client is not None
 
 
 # ---------------------------------------------------------------------------
@@ -404,4 +377,4 @@ class TestSaveRequest:
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
-# Made with Bob
+

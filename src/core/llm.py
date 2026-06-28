@@ -101,4 +101,4 @@ def get_embedding_model(model: str | None = None):
         )
 
 
-# Made with Bob
+

@@ -49,12 +49,9 @@ services:
       - "--error-logfile"
       - "-"
     environment:
-      # Database (same as base compose, using service names)
+      # Database (same as base compose, using service name)
       - POSTGRESQL_URL=postgresql://chatbot:chatbot_password@postgres:5432/chatbot
-      - REDIS_URL=redis://redis:6379
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - USE_REDIS_CHECKPOINTER=true
+      - USE_POSTGRES_CHECKPOINTER=true
       - ENVIRONMENT=e2e
 
       # LLM — any valid provider value; the actual LLM is patched out
@@ -75,4 +72,4 @@ services:
     # Remove resource limits for test environment
     deploy: {}
 
-# Made with Bob
+

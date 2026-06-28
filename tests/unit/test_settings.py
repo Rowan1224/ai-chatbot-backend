@@ -301,5 +301,45 @@ class TestAppConfig:
         cfg = self._make_config({})
         assert cfg.cors_origins == []
 
+    # --- Guardrails ---
 
-# Made with Bob
+    def test_guardrails_enabled_from_yaml(self):
+        cfg = self._make_config({"guardrails": {"enabled": False}})
+        assert cfg.guardrails_enabled is False
+
+    def test_guardrails_enabled_default_true(self):
+        cfg = self._make_config({})
+        assert cfg.guardrails_enabled is True
+
+    def test_pii_redaction_enabled_from_yaml(self):
+        cfg = self._make_config({"guardrails": {"pii_redaction_enabled": False}})
+        assert cfg.pii_redaction_enabled is False
+
+    def test_pii_redaction_enabled_default_true(self):
+        cfg = self._make_config({})
+        assert cfg.pii_redaction_enabled is True
+
+    def test_injection_detection_enabled_from_yaml(self):
+        cfg = self._make_config(
+            {"guardrails": {"injection_detection_enabled": False}}
+        )
+        assert cfg.injection_detection_enabled is False
+
+    def test_injection_detection_enabled_default_true(self):
+        cfg = self._make_config({})
+        assert cfg.injection_detection_enabled is True
+
+    def test_all_guardrail_flags_can_be_set_together(self):
+        cfg = self._make_config({
+            "guardrails": {
+                "enabled": True,
+                "pii_redaction_enabled": False,
+                "injection_detection_enabled": False,
+            }
+        })
+        assert cfg.guardrails_enabled is True
+        assert cfg.pii_redaction_enabled is False
+        assert cfg.injection_detection_enabled is False
+
+
+

@@ -4,7 +4,7 @@
 
 ```
 docker-compose.yml          # Local development — full stack in containers
-docker-compose.prod.yml     # Production — API only, external DB/Redis, no .env file
+docker-compose.prod.yml     # Production — API only, external DB, no .env file
 scripts/setup-local-env.sh  # One-time local .env generator
 src/config/app_config.yaml  # Behaviour config (models, thresholds, feature flags)
 src/config/prompt_config.yaml # System prompt and version
@@ -30,8 +30,8 @@ uv sync
 chmod +x scripts/setup-local-env.sh
 ./scripts/setup-local-env.sh
 
-# 3. Start Postgres + Redis
-docker compose up -d postgres redis
+# 3. Start Postgres
+docker compose up -d postgres
 
 # 4. Start the API (with hot reload)
 uv run uvicorn src.api.main:app --reload
@@ -57,7 +57,7 @@ docker compose up -d
 # Unit tests (no infrastructure required)
 uv run pytest tests/unit/ -v
 
-# Integration tests (spins up Postgres + Redis via testcontainers)
+# Integration tests (spins up Postgres via testcontainers)
 uv run pytest tests/integration/ -v -m integration
 
 # Full build + all tests + Docker image (interactive — prompts for runtime)
@@ -129,7 +129,6 @@ Manager, etc.) and export them before the deploy step:
 | `AZURE_OPENAI_ENDPOINT` | Required when `LLM_PROVIDER=azure` |
 | `ANTHROPIC_API_KEY` | Required when `LLM_PROVIDER=anthropic` |
 | `POSTGRESQL_URL` | Full connection string including credentials |
-| `REDIS_URL` | Redis connection URL |
 | `API_KEY` | Secret key for `X-API-Key` header |
 | `IMAGE_NAME` | Container image name (default: `ai-chatbot-api`) |
 | `IMAGE_TAG` | Image tag to deploy (default: `latest`) |
@@ -153,7 +152,6 @@ docker compose -f docker-compose.prod.yml up -d
     LLM_PROVIDER: ${{ vars.LLM_PROVIDER }}
     OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     POSTGRESQL_URL: ${{ secrets.POSTGRESQL_URL }}
-    REDIS_URL: ${{ secrets.REDIS_URL }}
     API_KEY: ${{ secrets.API_KEY }}
     IMAGE_NAME: my-registry/ai-chatbot-api
     IMAGE_TAG: ${{ github.sha }}
@@ -168,7 +166,6 @@ docker compose -f docker-compose.prod.yml up -d
     LLM_PROVIDER: $(LLM_PROVIDER)
     OPENAI_API_KEY: $(OPENAI_API_KEY)
     POSTGRESQL_URL: $(POSTGRESQL_URL)
-    REDIS_URL: $(REDIS_URL)
     API_KEY: $(API_KEY)
     IMAGE_NAME: $(IMAGE_NAME)
     IMAGE_TAG: $(Build.BuildId)
@@ -199,7 +196,7 @@ curl http://localhost:8000/health
 
 Expected response:
 ```json
-{"status": "healthy", "postgresql": "connected", "redis": "connected"}
+{"status": "healthy", "postgresql": "connected"}
 ```
 
 ---

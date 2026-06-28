@@ -76,11 +76,10 @@ Test individual functions and classes in isolation using mocks.
 - Schema-to-dict conversion
 
 **test_database.py** - Tests for database operations:
-- MongoDB client initialization
-- Redis client initialization
-- Exact match duplicate detection
-- Semantic similarity search
-- Request saving and updating
+- PostgreSQL client initialisation
+- Fuzzy candidate pre-filter (pg_trgm)
+- Vector similarity search (pgvector)
+- Request saving
 
 **test_workflow.py** - Tests for workflow logic:
 - Workflow initialization
@@ -97,8 +96,6 @@ Test multiple components working together (future implementation).
 
 Shared fixtures are defined in `conftest.py`:
 
-- `mock_mongodb_client` - Mock MongoDB client
-- `mock_redis_client` - Mock Redis client
 - `mock_llm` - Mock LLM for testing
 - `mock_embedding_model` - Mock embedding model
 - `sample_request_data` - Sample request with PII

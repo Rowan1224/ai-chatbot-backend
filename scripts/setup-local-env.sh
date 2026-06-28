@@ -96,16 +96,6 @@ else
 fi
 sed -i.bak "s|^API_KEY=.*|API_KEY=${_api_key}|" "${ENV_FILE}"
 
-# ── Redis ─────────────────────────────────────────────────────────────────────
-
-echo ""
-echo "Redis"
-echo "  Default: redis://localhost:6379 (local docker-compose stack)"
-read -rp "  REDIS_URL [press Enter for default]: " _redis_url
-if [[ -n "${_redis_url}" ]]; then
-    sed -i.bak "s|^REDIS_URL=.*|REDIS_URL=${_redis_url}|" "${ENV_FILE}"
-fi
-
 # ── LangSmith (optional) ──────────────────────────────────────────────────────
 
 echo ""
@@ -126,6 +116,6 @@ echo ""
 echo "✅ .env created at ${ENV_FILE}"
 echo ""
 echo "Next steps:"
-echo "  docker compose up -d        # start Postgres + Redis"
-echo "  uv run uvicorn src.api.main:app --reload  # start API"
+echo "  docker compose up -d        # start Postgres + API"
+echo "  uv run uvicorn src.api.main:app --reload  # start API (hot reload)"
 echo ""

@@ -42,22 +42,33 @@ class TestRoutingLogic:
         mongodb_client = MagicMock()
         return ConversationWorkflow(mongodb_client)
 
-    def test_route_entry_to_chat(self, workflow):
-        """Test routing to chat node."""
+    def test_route_after_guardrail_to_chat(self, workflow):
+        """Test routing to chat when no injection and no duplicate pending."""
         state = {
             "awaiting_duplicate_decision": False,
+            "injection_blocked": False,
         }
 
-        route = workflow.route_entry(state)
+        route = workflow.route_after_guardrail(state)
         assert route == "chat"
 
-    def test_route_entry_to_handle_duplicate_decision(self, workflow):
-        """Test routing to handle_duplicate_decision node."""
+    def test_route_after_guardrail_blocked(self, workflow):
+        """Test routing to END when injection was blocked."""
         state = {
-            "awaiting_duplicate_decision": True,
+            "injection_blocked": True,
         }
 
-        route = workflow.route_entry(state)
+        route = workflow.route_after_guardrail(state)
+        assert route == "__end__"
+
+    def test_route_after_guardrail_to_duplicate_decision(self, workflow):
+        """Test routing to handle_duplicate_decision when awaiting."""
+        state = {
+            "awaiting_duplicate_decision": True,
+            "injection_blocked": False,
+        }
+
+        route = workflow.route_after_guardrail(state)
         assert route == "handle_duplicate_decision"
 
     def test_should_extract_ready(self, workflow):
@@ -230,4 +241,4 @@ class TestBuildGraph:
         assert workflow.app is not None
 
 
-# Made with Bob
+

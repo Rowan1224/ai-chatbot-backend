@@ -4,7 +4,7 @@
 # Edit this file and restart the server to change models, thresholds, or
 # feature flags without touching .env.
 #
-# Secrets (API keys, DB URLs) and infrastructure (Redis, checkpointer) remain
+# Secrets (API keys, DB URLs) and infrastructure settings remain
 # in .env — they are environment-specific or sensitive.
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -14,6 +14,21 @@
 llm:
   chat_model: "o4-mini"
   embedding_model: "text-embedding-3-small"
+
+# Input guardrails — applied by guardrail_node before every chat turn.
+# Guardrail is always the unconditional graph entry point; these flags
+# control which checks are active inside it.
+guardrails:
+  # Master switch — set to false to disable all guardrail checks.
+  enabled: true
+  # Redact emails ([REDACTED_EMAIL]) and mask credit-card numbers
+  # (****-****-****-XXXX) from user messages before they reach the LLM.
+  # Uses the same detector functions that back PIIMiddleware.
+  pii_redaction_enabled: true
+  # Detect and block common prompt-injection / jailbreak patterns
+  # (e.g. "ignore previous instructions", "you are now DAN").
+  # The turn is ended with a refusal message; nothing reaches the LLM.
+  injection_detection_enabled: true
 
 # Duplicate detection behaviour and tuning knobs
 duplicate_detection:
@@ -59,4 +74,4 @@ cors:
 logging:
   level: "INFO"
 
-# Made with Bob
+

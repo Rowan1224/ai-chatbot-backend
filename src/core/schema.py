@@ -114,7 +114,7 @@ def get_text_fields(data: dict[str, Any]) -> list[str]:
     """
     Return the non-PII text field names present in ``data``.
 
-    Works from the *actual extracted data keys* rather than a
+    Works from the actual extracted data keys rather than a
     static YAML field list, so it stays correct across schema
     versions without any code change.
 
@@ -132,4 +132,3 @@ def get_text_fields(data: dict[str, Any]) -> list[str]:
     ]
 
 
-# Made with Bob

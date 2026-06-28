@@ -60,6 +60,7 @@ def _make_state(**overrides) -> dict:
         "collected_data": {},
         "is_ready": False,
         "is_complete": False,
+        "request_active": True,
         "duplicate_warning": [],
         "config_version": "v1",
         "awaiting_duplicate_decision": False,
@@ -154,7 +155,7 @@ class TestExtractNode:
 
     @pytest.mark.asyncio
     async def test_extract_node_success(self, workflow):
-        """Successful extraction returns collected_data and is_complete=True."""
+        """Successful extraction returns collected_data without marking submission complete."""
         from src.core.schema import DataField, ExtractedRequest
 
         workflow.llm_extract.ainvoke = AsyncMock(
@@ -171,7 +172,8 @@ class TestExtractNode:
         state = _make_state(messages=[HumanMessage(content="deploy please")])
         result = await workflow.extract_node(state)
 
-        assert result["is_complete"] is True
+        assert result["is_complete"] is False
+        assert result["request_active"] is True
         assert result["collected_data"]["request_type"] == "infrastructure-provisioning"
         assert result["collected_data"]["name"] == "Jane"
         assert result["collected_data"]["target_environment"] == "production"
@@ -187,6 +189,7 @@ class TestExtractNode:
         result = await workflow.extract_node(state)
 
         assert result["is_complete"] is False
+        assert result["request_active"] is True
         assert result["is_ready"] is True
         assert "trouble" in result["messages"][0].content.lower()
 
@@ -221,6 +224,7 @@ class TestSaveNode:
             result = await workflow.save_node(state)
 
         assert result["is_complete"] is True
+        assert result["request_active"] is False
         assert "uuid-1234" in result["messages"][0].content
         mock_save.assert_awaited_once()
 
@@ -232,6 +236,7 @@ class TestSaveNode:
         result = await workflow.save_node(state)
 
         assert result["is_complete"] is False
+        assert result["request_active"] is True
         assert result["is_ready"] is True
         assert "trouble" in result["messages"][0].content.lower()
 
@@ -380,6 +385,7 @@ class TestDuplicateCheckNode:
             result = await workflow.duplicate_check_node(state)
 
         assert result.get("awaiting_duplicate_decision") is True
+        assert result.get("request_active") is True
         assert len(result.get("duplicate_warning", [])) == 1
         assert result["is_complete"] is False
 
@@ -510,6 +516,7 @@ class TestHandleDuplicateDecisionNode:
         assert result["duplicate_decision"] == "modify"
         assert result["collected_data"] == {}
         assert result["is_ready"] is False
+        assert result["request_active"] is True
         assert result["awaiting_duplicate_decision"] is False
 
     @pytest.mark.asyncio
@@ -527,6 +534,7 @@ class TestHandleDuplicateDecisionNode:
         result = await workflow.handle_duplicate_decision_node(state)
 
         assert result["duplicate_decision"] == "proceed"
+        assert result["request_active"] is True
         assert result["awaiting_duplicate_decision"] is False
 
     @pytest.mark.asyncio
@@ -540,11 +548,15 @@ class TestHandleDuplicateDecisionNode:
         state = _make_state(
             messages=[HumanMessage(content="cancel")],
             awaiting_duplicate_decision=True,
+            duplicate_warning=[{"id": "dup-1"}],
         )
         result = await workflow.handle_duplicate_decision_node(state)
 
         assert result["duplicate_decision"] == "cancel"
         assert result["is_complete"] is False
+        assert result["request_active"] is False
+        assert result["collected_data"] == {}
+        assert result["duplicate_warning"] == []
 
     @pytest.mark.asyncio
     async def test_unrecognised_choice_sets_decision_none(self, workflow):
@@ -609,5 +621,68 @@ class TestGetApp:
         wf.compile(InMemorySaver())
         assert wf.get_app() is wf.app
 
+    def test_build_graph_includes_guardrail_node(self):
+        """Compiled graph must contain a 'guardrail' node."""
+        with (
+            patch("src.core.workflow.get_llm", return_value=MagicMock()),
+            patch("src.core.workflow.get_embedding_model", return_value=AsyncMock()),
+        ):
+            wf = ConversationWorkflow(pg_client=MagicMock())
 
-# Made with Bob
+        graph = wf.build_graph()
+        # StateGraph exposes its node names via .nodes dict
+        assert "guardrail" in graph.nodes
+
+
+# ---------------------------------------------------------------------------
+# guardrail_node integration via route_after_guardrail
+# ---------------------------------------------------------------------------
+
+
+class TestGuardrailRouting:
+    """
+    Tests that route_after_guardrail correctly integrates with
+    the guardrail_node output: injection_blocked flag, awaiting
+    duplicate decision flag, and normal chat flow.
+    """
+
+    @pytest.fixture
+    def wf(self):
+        with (
+            patch("src.core.workflow.get_llm", return_value=MagicMock()),
+            patch("src.core.workflow.get_embedding_model", return_value=AsyncMock()),
+        ):
+            return ConversationWorkflow(pg_client=MagicMock())
+
+    def test_injection_blocked_routes_to_end(self, wf):
+        state = {"injection_blocked": True}
+        assert wf.route_after_guardrail(state) == "__end__"
+
+    def test_injection_blocked_takes_priority_over_duplicate_flag(self, wf):
+        """Even if awaiting_duplicate_decision is set, a blocked injection ends the turn."""
+        state = {
+            "injection_blocked": True,
+            "awaiting_duplicate_decision": True,
+        }
+        assert wf.route_after_guardrail(state) == "__end__"
+
+    def test_clean_message_with_duplicate_pending_routes_to_handler(self, wf):
+        state = {
+            "injection_blocked": False,
+            "awaiting_duplicate_decision": True,
+        }
+        assert wf.route_after_guardrail(state) == "handle_duplicate_decision"
+
+    def test_clean_message_normal_routes_to_chat(self, wf):
+        state = {
+            "injection_blocked": False,
+            "awaiting_duplicate_decision": False,
+        }
+        assert wf.route_after_guardrail(state) == "chat"
+
+    def test_missing_flags_default_to_chat(self, wf):
+        """Absent keys must behave as falsy — fall through to chat."""
+        assert wf.route_after_guardrail({}) == "chat"
+
+
+

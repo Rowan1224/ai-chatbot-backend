@@ -29,11 +29,11 @@ This walks you through provider selection, API keys, and generates a secure `API
 docker compose up -d
 ```
 
-This starts Postgres, Redis, and the API together. API is at `http://localhost:8000`. Docs at `http://localhost:8000/docs`.
+This starts Postgres and the API together. API is at `http://localhost:8000`. Docs at `http://localhost:8000/docs`.
 
 > **Iterating on code?** Skip the API container and run it locally with hot reload instead:
 > ```bash
-> docker compose up -d postgres redis
+> docker compose up -d postgres
 > uv run uvicorn src.api.main:app --reload
 > ```
 > This way code changes take effect immediately without rebuilding the image.
@@ -62,7 +62,7 @@ uv run pytest tests/unit/ -v
 # With coverage
 ./scripts/run_tests.sh
 
-# Integration (spins up Postgres + Redis automatically)
+# Integration (spins up Postgres automatically via testcontainers)
 uv run pytest tests/integration/ -v -m integration
 ```
 

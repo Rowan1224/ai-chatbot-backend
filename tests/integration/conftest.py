@@ -1,9 +1,8 @@
 """
 Shared fixtures for integration tests.
 
-Starts a real PostgreSQL+pgvector container and a real Redis container
-once per test session via testcontainers, then tears them down after the
-session ends.
+Starts a real PostgreSQL+pgvector container once per test session via
+testcontainers, then tears it down after the session ends.
 
 DATABASE ISOLATION STRATEGY
 ----------------------------
@@ -13,12 +12,6 @@ Rather than fighting that, we expose the raw DSN as a session fixture
 and let each test (or a function-scoped helper) create its own
 PostgreSQLClient that lives exactly one test.  This is safe because
 testcontainers keeps the Postgres process running for the whole session.
-
-REDIS
------
-LangGraph's AsyncRedisSaver and the plain redis.asyncio client are
-per-invocation objects created inside each test function, so they also
-naturally avoid cross-loop issues.
 
 Run with:  pytest tests/integration/ -v
 
@@ -35,7 +28,6 @@ import os
 import pytest
 import pytest_asyncio
 from testcontainers.postgres import PostgresContainer
-from testcontainers.redis import RedisContainer
 
 import src.config.settings as _settings_mod
 from src.core.database import PostgreSQLClient
@@ -61,11 +53,10 @@ if not os.environ.get("DOCKER_HOST"):
             os.environ.setdefault("TESTCONTAINERS_RYUK_DISABLED", "true")
 
 # ---------------------------------------------------------------------------
-# Container images — match docker-compose.yml exactly
+# Container image — matches docker-compose.yml exactly
 # ---------------------------------------------------------------------------
 
 PG_IMAGE = "pgvector/pgvector:pg16"
-REDIS_IMAGE = "redis/redis-stack-server:latest"
 
 # ---------------------------------------------------------------------------
 # Session-scoped containers (started once, reused across all tests)
@@ -100,22 +91,25 @@ def pg_dsn(postgres_container):
     )
 
 
-@pytest.fixture(scope="session")
-def redis_container():
-    """
-    Start a redis/redis-stack-server container once for the session.
-    Redis Stack is required by langgraph-checkpoint-redis.
-    """
-    with RedisContainer(image=REDIS_IMAGE) as container:
-        yield container
+# ---------------------------------------------------------------------------
+# Function-scoped checkpointer (AsyncPostgresSaver against the test container)
+# ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="session")
-def redis_url(redis_container):
-    """Return the redis:// URL for the running container."""
-    host = redis_container.get_container_host_ip()
-    port = redis_container.get_exposed_port(6379)
-    return f"redis://{host}:{port}"
+@pytest_asyncio.fixture
+async def checkpointer(pg_dsn):
+    """
+    Function-scoped AsyncPostgresSaver — opens its own psycopg pool
+    against the running Postgres test container and tears it down after
+    each test.  setup() is idempotent (CREATE IF NOT EXISTS tables).
+    """
+    from langgraph.checkpoint.postgres.aio import (
+        AsyncPostgresSaver,
+    )
+
+    async with AsyncPostgresSaver.from_conn_string(pg_dsn) as cp:
+        await cp.setup()
+        yield cp
 
 
 # ---------------------------------------------------------------------------
@@ -151,4 +145,4 @@ async def clean_db(pg_client):
     yield
 
 
-# Made with Bob
+

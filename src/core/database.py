@@ -1,4 +1,4 @@
-"""Database connections for PostgreSQL (pgvector) and Redis."""
+"""Database connections for PostgreSQL (pgvector)."""
 
 import json
 import logging
@@ -8,7 +8,6 @@ from typing import Any
 
 import asyncpg
 from pgvector.asyncpg import register_vector
-from redis.asyncio import Redis
 
 from src.config.settings import (
     app_config,
@@ -384,41 +383,3 @@ def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
     return d
 
 
-class RedisClient:
-    """Redis client for LangGraph checkpointing."""
-
-    def __init__(self) -> None:
-        """Initialize Redis client."""
-        self.client: Redis | None = None
-
-    async def connect(self) -> None:
-        """Connect to Redis."""
-        try:
-            self.client = Redis(
-                host=settings.redis_host,
-                port=settings.redis_port,
-                decode_responses=True,
-                protocol=2,
-            )
-            await self.client.ping()
-            logger.info("Connected to Redis")
-        except Exception as e:
-            logger.error(f"Failed to connect to Redis: {e}")
-            raise
-
-    async def close(self) -> None:
-        """Close Redis connection."""
-        if self.client:
-            await self.client.close()
-            logger.info("Redis connection closed")
-
-    async def get_client(self) -> Redis:
-        """Get Redis client instance."""
-        if not self.client:
-            await self.connect()
-        return self.client
-
-
-# Note: Instances are created in main.py lifespan, not here.
-
-# Made with Bob

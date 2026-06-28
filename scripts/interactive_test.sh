@@ -64,6 +64,7 @@ send_message() {
     # Extract fields from response
     bot_response=$(echo "$response" | jq -r '.response' 2>/dev/null)
     is_complete=$(echo "$response" | jq -r '.is_complete' 2>/dev/null)
+    request_active=$(echo "$response" | jq -r '.request_active' 2>/dev/null)
     duplicate_warning=$(echo "$response" | jq -r '.duplicate_warning' 2>/dev/null)
 
     if [ "$bot_response" = "null" ] || [ -z "$bot_response" ]; then
@@ -81,12 +82,17 @@ send_message() {
     fi
 
     # Show completion status and signal the loop to exit
-    if [ "$is_complete" = "true" ]; then
+    if [ "$is_complete" = "true" ] && [ "$request_active" = "false" ]; then
         echo -e "${GREEN}✅ Conversation complete!${NC}"
         echo ""
         echo "Final data:"
         echo "$response" | jq '.collected_data'
         echo ""
+        return 2  # sentinel: conversation finished
+    fi
+    if [ "$is_complete" = "false" ] && [ "$request_active" = "false" ]; then
+        echo -e "${YELLOW}Conversation ended.${NC}"
+        echo "User ended the conversation"
         return 2  # sentinel: conversation finished
     fi
 
@@ -144,4 +150,4 @@ while true; do
     fi
 done
 
-# Made with Bob
+

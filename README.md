@@ -24,7 +24,7 @@ docker compose up -d
 ```bash
 uv sync
 ./scripts/setup-local-env.sh
-docker compose up -d postgres redis
+docker compose up -d postgres
 uv run uvicorn src.api.main:app --reload
 ```
 

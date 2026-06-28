@@ -4,7 +4,7 @@
 
 Managing multi-turn conversations requires tracking state across HTTP requests — the bot needs to remember what it has already collected, whether it is waiting for a duplicate decision, and the full message history.
 
-LangGraph handles this with a graph of nodes and explicit state. Each node returns a partial state update; LangGraph merges it and persists the full state to Redis. The routing logic (`should_extract`, `after_duplicate_decision`, etc.) is just Python functions returning strings — easy to read and test.
+LangGraph handles this with a graph of nodes and explicit state. Each node returns a partial state update; LangGraph merges it and persists the full state to PostgreSQL (via `AsyncPostgresSaver`). The routing logic (`should_extract`, `after_duplicate_decision`, etc.) is just Python functions returning strings — easy to read and test.
 
 The alternative would be manually serialising and deserialising conversation state on every request. LangGraph removes that boilerplate and makes the flow visible as a graph.
 
@@ -16,7 +16,7 @@ PostgreSQL with the `pgvector` extension covers everything MongoDB would have pr
 - JSONB for schema-free document storage
 - `pgvector` for vector similarity search
 - `pg_trgm` for fuzzy text matching
-- A single database for both application data and LangGraph checkpoints
+- A single database for both application data and LangGraph checkpoints (no separate Redis service needed)
 
 The schema-free design is preserved: `additional_data` is stored as JSONB. Adding new fields to the prompt requires no migration.
 
@@ -81,5 +81,32 @@ model_config = SettingsConfigDict(
 ```
 
 `pydantic-settings` checks environment variables first and falls back to the secrets directory, so both mechanisms work simultaneously. This makes the migration to Swarm or Kubernetes a infrastructure change only — no Python changes required.
+
+---
+
+## Input guardrails: regex layer + LLM provider defence-in-depth
+
+Two input safety concerns are handled before any user message reaches the chat node:
+
+**PII redaction** uses LangChain's `PIIMiddleware` detector functions (`detect_email`, `detect_credit_card`, `apply_strategy`) directly rather than through the middleware. The middleware's `before_model` / `after_model` hooks have no attachment surface on a hand-built `StateGraph`, so the detectors are consumed at the function level instead. The behaviour is identical; the integration path is different.
+
+**Prompt-injection detection** uses compiled regexes that match the most common jailbreak and instruction-override patterns (role override, ignore-instructions phrasing, DAN, developer mode, etc.). A matched message is blocked immediately — the turn ends with a refusal reply and the graph never proceeds to the `chat` node.
+
+### Why only common patterns — not exhaustive coverage
+
+The regex layer does not attempt to catch every possible injection variant. The reason is that **all three supported LLM providers** (OpenAI, Azure OpenAI, Anthropic) enforce their own content and safety policies server-side. Any injection attempt that is sophisticated enough to bypass the regex patterns will still encounter the provider's own guardrails. The `chat_node` already handles the `BadRequestError` (HTTP 400) that providers return when a message is rejected by their content policy — it responds with a refusal message identical in tone to the local rejection.
+
+This means the regex layer and the provider layer are complementary:
+
+| Layer | What it catches | Latency cost |
+|---|---|---|
+| Regex (local) | Common, well-known patterns | Zero — no network call |
+| LLM provider (remote) | Novel, obfuscated, or context-dependent injections | Already paid for every turn |
+
+Because the provider acts as a reliable backstop, keeping the regex list focused on high-frequency patterns is the correct trade-off. Trying to enumerate all injection variants in regexes would be an arms race with diminishing returns and a high false-positive risk for legitimate messages.
+
+### Configuration
+
+Both checks are independently togglable in `app_config.yaml` under `guardrails:` — `pii_redaction_enabled` and `injection_detection_enabled`. A master `enabled` flag disables the entire `guardrail_node` without removing it from the graph topology.
 
 ---

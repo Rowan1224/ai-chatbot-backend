@@ -50,14 +50,10 @@ class Settings(BaseSettings):
     # PostgreSQL — connection string includes credentials and host
     postgresql_url: str = Field(..., description="PostgreSQL connection URL")
 
-    # Redis — infrastructure endpoint
-    redis_url: str = Field(default="redis://localhost:6379", description="Redis connection URL")
-    redis_host: str = Field(default="localhost", description="Redis host")
-    redis_port: int = Field(default=6379, description="Redis port")
-    redis_password: str | None = Field(default=None, description="Redis password")
-    use_redis_checkpointer: bool = Field(
+    # Checkpointer — toggle between Postgres (production) and InMemory (dev)
+    use_postgres_checkpointer: bool = Field(
         default=True,
-        description="Use Redis for LangGraph checkpointing (False = InMemory for dev/test)"
+        description="Use Postgres for LangGraph checkpointing (False = InMemory, no DB needed)"
     )
 
     # API secret key — no default so it must be set explicitly in production
@@ -182,6 +178,28 @@ class AppConfig:
 
     # --- CORS ---
 
+    # --- Guardrails ---
+
+    @property
+    def guardrails_enabled(self) -> bool:
+        return self._config.get(
+            "guardrails", {}
+        ).get("enabled", True)
+
+    @property
+    def pii_redaction_enabled(self) -> bool:
+        return self._config.get(
+            "guardrails", {}
+        ).get("pii_redaction_enabled", True)
+
+    @property
+    def injection_detection_enabled(self) -> bool:
+        return self._config.get(
+            "guardrails", {}
+        ).get("injection_detection_enabled", True)
+
+    # --- Rate limiting ---
+
     @property
     def rate_limit_rpm(self) -> int:
         return self._config.get(
@@ -204,4 +222,4 @@ settings = Settings()
 prompt_config = PromptConfig(settings.prompt_config_path)
 app_config = AppConfig(settings.app_config_path)
 
-# Made with Bob
+

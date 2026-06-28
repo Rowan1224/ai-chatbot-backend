@@ -18,7 +18,8 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.checkpoint.redis import AsyncRedisSaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from openai import BadRequestError
 
 from src.api.models import (
     ChatRequest,
@@ -27,7 +28,7 @@ from src.api.models import (
     SessionResponse,
 )
 from src.config.settings import app_config, settings
-from src.core.database import PostgreSQLClient, RedisClient
+from src.core.database import PostgreSQLClient
 from src.core.workflow import ConversationWorkflow
 
 # Configure logging
@@ -69,7 +70,10 @@ async def check_rate_limit(request: Request) -> None:
     window = _rate_limit_store.setdefault(session_id, deque())
 
     # Drop timestamps older than the sliding window
-    while window and now - window[0] > _WINDOW:
+    while window:
+        oldest = window[0]
+        if now - oldest <= _WINDOW:
+            break
         window.popleft()
 
     if len(window) >= rpm:
@@ -97,9 +101,8 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting AI Chatbot Backend...")
 
-    # Initialize database clients
+    # Initialize PostgreSQL client
     pg_client = PostgreSQLClient()
-    redis_client = RedisClient()
 
     # Connect to PostgreSQL — retry up to 3 times to tolerate brief
     # unavailability during rolling deployments or container startup.
@@ -121,42 +124,54 @@ async def lifespan(app: FastAPI):
             )
             await asyncio.sleep(wait)
 
-    # Create LangGraph checkpointer based on environment
-    if settings.use_redis_checkpointer:
-        # Production/Test/Acc: Use Redis for persistence
-        await redis_client.connect()
-        logger.info("Redis connected")
+    # Create LangGraph checkpointer based on environment:
+    # - True  (default): AsyncPostgresSaver — persistent sessions, production-ready
+    # - False: InMemorySaver — no DB needed, sessions lost on restart (local dev)
+    if settings.use_postgres_checkpointer:
+        async with AsyncPostgresSaver.from_conn_string(
+            settings.postgresql_url
+        ) as checkpointer:
+            await checkpointer.setup()
+            logger.info("Using Postgres checkpointer")
 
-        redis_conn = await redis_client.get_client()
-        checkpointer = AsyncRedisSaver(redis_client=redis_conn)
-        await checkpointer.asetup()
+            workflow = ConversationWorkflow(pg_client=pg_client)
+            conversation_app = workflow.compile(
+                checkpointer=checkpointer
+            )
+            logger.info("LangGraph workflow compiled")
 
-        logger.info(f"Using Redis checkpointer at {settings.redis_url}")
+            app.state.pg_client = pg_client
+            app.state.conversation_app = conversation_app
+
+            yield
+
+            # Shutdown
+            logger.info("Shutting down AI Chatbot Backend...")
+            await pg_client.close()
+            logger.info("PostgreSQL connection closed")
     else:
-        # Development: Use in-memory (no persistence between restarts)
+        # Development: InMemory — no DB dependency, sessions lost on restart
         checkpointer = InMemorySaver()
-        logger.info("Using InMemory checkpointer (dev mode - no persistence)")
+        logger.info(
+            "Using InMemory checkpointer "
+            "(dev mode - no persistence)"
+        )
 
-    # Initialize workflow with clients and compile with checkpointer
-    workflow = ConversationWorkflow(pg_client=pg_client)
-    conversation_app = workflow.compile(checkpointer=checkpointer)
-    logger.info("LangGraph workflow compiled")
+        workflow = ConversationWorkflow(pg_client=pg_client)
+        conversation_app = workflow.compile(
+            checkpointer=checkpointer
+        )
+        logger.info("LangGraph workflow compiled")
 
-    # Store in app state for access in endpoints
-    app.state.pg_client = pg_client
-    app.state.redis_client = redis_client
-    app.state.conversation_app = conversation_app
+        app.state.pg_client = pg_client
+        app.state.conversation_app = conversation_app
 
-    yield
+        yield
 
-    # Shutdown
-    logger.info("Shutting down AI Chatbot Backend...")
-    await pg_client.close()
-    logger.info("PostgreSQL connection closed")
-
-    if settings.use_redis_checkpointer:
-        await redis_client.close()
-        logger.info("Redis connection closed")
+        # Shutdown
+        logger.info("Shutting down AI Chatbot Backend...")
+        await pg_client.close()
+        logger.info("PostgreSQL connection closed")
 
 
 # Create FastAPI app
@@ -235,10 +250,30 @@ async def chat(
             response=response_text,
             is_ready=result.get("is_ready", False),
             is_complete=result.get("is_complete", False),
+            request_active=result.get("request_active", True),
             collected_data=result.get("collected_data"),
             duplicate_warning=result.get("duplicate_warning"),
         )
 
+    except BadRequestError as e:
+        if e.status_code != 400:
+            logger.error(f"Error in chat endpoint: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to process chat message: {str(e)}",
+            ) from e
+        logger.warning(
+            "LLM request blocked by provider content policy: %s",
+            e,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "⚠️ I can't help with that request. Please rephrase "
+                "it as a legitimate engineering service desk request "
+                "and try again."
+            ),
+        ) from e
     except Exception as e:
         logger.error(f"Error in chat endpoint: {e}", exc_info=True)
         raise HTTPException(
@@ -280,40 +315,23 @@ async def health_check() -> HealthResponse:
     """
     Health check endpoint for Docker and monitoring.
 
-    Checks connectivity to PostgreSQL and Redis.
+    Checks connectivity to PostgreSQL.
     """
     postgresql_status = "disconnected"
-    redis_status = "disconnected"
 
     try:
-        # Check PostgreSQL
         await app.state.pg_client.ping()
         postgresql_status = "connected"
     except Exception as e:
         logger.error(f"PostgreSQL health check failed: {e}")
 
-    try:
-        # Check Redis (only if using Redis checkpointer)
-        if settings.use_redis_checkpointer:
-            client = await app.state.redis_client.get_client()
-            await client.ping()
-            redis_status = "connected"
-        else:
-            redis_status = "disabled (dev mode)"
-    except Exception as e:
-        logger.error(f"Redis health check failed: {e}")
-
     overall_status = (
-        "healthy"
-        if postgresql_status == "connected"
-        and redis_status in ("connected", "disabled (dev mode)")
-        else "unhealthy"
+        "healthy" if postgresql_status == "connected" else "unhealthy"
     )
 
     return HealthResponse(
         status=overall_status,
         postgresql=postgresql_status,
-        redis=redis_status,
     )
 
 
@@ -327,4 +345,3 @@ async def root():
         "health": "/health",
     }
 
-# Made with Bob

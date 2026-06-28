@@ -19,7 +19,15 @@ class ChatRequest(BaseModel):
             "1–128 alphanumeric, hyphen, or underscore characters."
         ),
     )
-    message: str = Field(..., description="User's message")
+    message: str = Field(
+        ...,
+        min_length=1,
+        max_length=2000,
+        description=(
+            "User's message. "
+            "1–2000 characters."
+        ),
+    )
 
 
 # Response Models
@@ -29,9 +37,13 @@ class ChatResponse(BaseModel):
     session_id: str = Field(..., description="Session identifier")
     response: str = Field(..., description="Bot's response message")
     is_ready: bool = Field(default=False, description="True when ready to extract data")
-    is_complete: bool = Field(default=False, description="True when data extraction complete")
+    is_complete: bool = Field(default=False, description="True when request submission is complete")
+    request_active: bool = Field(
+        default=True,
+        description="True while the current request flow is still active",
+    )
     collected_data: dict[str, Any] | None = Field(
-        default=None, description="Collected structured data (if complete)"
+        default=None, description="Collected structured data (if available)"
     )
     duplicate_warning: list[dict[str, Any]] | None = Field(
         default=None, description="Similar requests found (if any)"
@@ -50,7 +62,6 @@ class HealthResponse(BaseModel):
 
     status: str
     postgresql: str
-    redis: str
 
 
-# Made with Bob
+

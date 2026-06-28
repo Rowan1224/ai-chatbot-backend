@@ -14,16 +14,6 @@ os.environ.setdefault(
     "POSTGRESQL_URL",
     "postgresql://test:test@localhost:5432/test_chatbot",
 )
-os.environ.setdefault("REDIS_URL", "redis://localhost:6379")
-
-
-@pytest.fixture
-def mock_redis_client():
-    """Create a mock Redis client."""
-    client = MagicMock()
-    return client
-
-
 @pytest.fixture
 def mock_llm():
     """Create a mock LLM."""
@@ -77,6 +67,7 @@ def sample_conversation_state():
         "collected_data": {},
         "is_ready": False,
         "is_complete": False,
+        "request_active": True,
         "duplicate_warning": [],
         "config_version": "v2.0",
         "awaiting_duplicate_decision": False,
@@ -84,4 +75,4 @@ def sample_conversation_state():
     }
 
 
-# Made with Bob
+

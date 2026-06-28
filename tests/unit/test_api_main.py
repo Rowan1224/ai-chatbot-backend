@@ -1,12 +1,14 @@
 """Unit tests for FastAPI endpoints (src/api/main.py)."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from openai import BadRequestError
 
 # ---------------------------------------------------------------------------
-# App fixture — patches lifespan so no real DB/Redis is needed
+# App fixture — patches lifespan so no real DB is needed
 # ---------------------------------------------------------------------------
 
 
@@ -14,7 +16,7 @@ from fastapi.testclient import TestClient
 def app_with_mocked_state():
     """
     Import the FastAPI app and inject mocked state so no real
-    infrastructure (PostgreSQL / Redis) is required.
+    infrastructure (PostgreSQL) is required.
     """
     from src.api.main import app
 
@@ -26,7 +28,6 @@ def app_with_mocked_state():
     # Inject directly into app.state (bypasses lifespan)
     app.state.conversation_app = fake_convo_app
     app.state.pg_client = AsyncMock()
-    app.state.redis_client = AsyncMock()
 
     return app, fake_convo_app
 
@@ -120,6 +121,7 @@ class TestChatEndpoint:
                 "messages": [AIMessage(content="How can I help?")],
                 "is_ready": False,
                 "is_complete": False,
+                "request_active": True,
                 "collected_data": None,
                 "duplicate_warning": None,
             }
@@ -135,6 +137,7 @@ class TestChatEndpoint:
         assert body["response"] == "How can I help?"
         assert body["is_ready"] is False
         assert body["is_complete"] is False
+        assert body["request_active"] is True
 
     def test_chat_propagates_is_complete_true(self, client):
         tc, fake_app = client
@@ -145,6 +148,7 @@ class TestChatEndpoint:
                 "messages": [AIMessage(content="Done!")],
                 "is_ready": True,
                 "is_complete": True,
+                "request_active": False,
                 "collected_data": {"request_type": "infra"},
                 "duplicate_warning": None,
             }
@@ -157,6 +161,7 @@ class TestChatEndpoint:
         assert resp.status_code == 200
         body = resp.json()
         assert body["is_complete"] is True
+        assert body["request_active"] is False
         assert body["collected_data"] == {"request_type": "infra"}
 
     def test_chat_returns_500_on_workflow_exception(self, client):
@@ -169,6 +174,27 @@ class TestChatEndpoint:
             headers=VALID_HEADERS,
         )
         assert resp.status_code == 500
+
+    def test_chat_returns_graceful_message_on_openai_bad_request(self, client):
+        tc, fake_app = client
+        error = BadRequestError(
+            message="content policy triggered",
+            response=SimpleNamespace(
+                request=None,
+                status_code=400,
+                headers={},
+            ),
+            body={"error": {"message": "content policy triggered"}},
+        )
+        fake_app.ainvoke = AsyncMock(side_effect=error)
+
+        resp = tc.post(
+            "/chat",
+            json={"session_id": "content-policy", "message": "blocked"},
+            headers=VALID_HEADERS,
+        )
+        assert resp.status_code == 400
+        assert "can't help" in resp.json()["detail"].lower()
 
     def test_chat_empty_messages_falls_back_to_no_response(self, client):
         tc, fake_app = client
@@ -251,7 +277,7 @@ class TestHealthEndpoint:
         app_obj.state.pg_client.ping = AsyncMock(return_value=True)
 
         with patch("src.api.main.settings") as mock_settings:
-            mock_settings.use_redis_checkpointer = False
+            mock_settings.use_postgres_checkpointer = True
             mock_settings.log_level = "INFO"
             mock_settings.api_key = "test-api-key"
 
@@ -261,7 +287,6 @@ class TestHealthEndpoint:
         body = resp.json()
         assert "status" in body
         assert "postgresql" in body
-        assert "redis" in body
 
     def test_health_shows_disconnected_on_pg_failure(self, client):
         tc, _ = client
@@ -272,7 +297,7 @@ class TestHealthEndpoint:
         )
 
         with patch("src.api.main.settings") as mock_settings:
-            mock_settings.use_redis_checkpointer = False
+            mock_settings.use_postgres_checkpointer = True
             mock_settings.log_level = "INFO"
             mock_settings.api_key = "test-api-key"
 
@@ -282,30 +307,5 @@ class TestHealthEndpoint:
         body = resp.json()
         assert body["postgresql"] == "disconnected"
 
-    def test_health_shows_redis_connected_when_checkpointer_enabled(self, client):
-        tc, _ = client
-        app_obj = tc.app
-
-        app_obj.state.pg_client.ping = AsyncMock(return_value=True)
-
-        mock_redis_client_instance = AsyncMock()
-        mock_redis_client_instance.ping = AsyncMock(return_value=True)
-
-        app_obj.state.redis_client.get_client = AsyncMock(
-            return_value=mock_redis_client_instance
-        )
-
-        with patch("src.api.main.settings") as mock_settings:
-            mock_settings.use_redis_checkpointer = True
-            mock_settings.redis_url = "redis://localhost:6379"
-            mock_settings.log_level = "INFO"
-            mock_settings.api_key = "test-api-key"
-
-            resp = tc.get("/health")
-
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["redis"] == "connected"
 
 
-# Made with Bob

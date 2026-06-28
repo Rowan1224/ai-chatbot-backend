@@ -15,15 +15,16 @@ ai-chatbot-backend/
 │   │
 │   └── core/
 │       ├── workflow.py      # LangGraph graph definition and nodes
+│       ├── guardrails.py    # Input guardrail node — PII redaction + injection detection
 │       ├── models.py        # Pydantic state models (ChatResponse, ConversationState, …)
 │       ├── prompts.py       # Internal LLM prompt constants
 │       ├── schema.py        # Extraction schema (ExtractedRequest)
-│       ├── database.py      # PostgreSQL and Redis clients, query functions
+│       ├── database.py      # PostgreSQL client and query functions
 │       └── llm.py           # LLM and embedding model factory
 │
 ├── tests/
 │   ├── unit/                # Fast, no infrastructure — mocked dependencies
-│   ├── integration/         # Postgres + Redis via testcontainers
+│   ├── integration/         # Postgres via testcontainers
 │   └── e2e/                 # Full stack against the built Docker image
 │
 ├── deploy/
@@ -37,7 +38,7 @@ ai-chatbot-backend/
 │
 ├── docs/                    # You are here
 │
-├── docker-compose.yml       # Local dev stack (Postgres + Redis + API)
+├── docker-compose.yml       # Local dev stack (Postgres + API)
 ├── Dockerfile               # Multi-stage image build
 ├── .env.example             # Documents all required environment variables
 └── pyproject.toml           # Dependencies and project metadata

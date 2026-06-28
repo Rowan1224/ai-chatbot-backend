@@ -189,4 +189,4 @@ class TestGetEmbeddingModel:
             assert call_kwargs.kwargs["model"] == "text-embedding-ada-002"
 
 
-# Made with Bob
+

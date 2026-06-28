@@ -9,7 +9,6 @@ import pytest
 
 from src.core.database import (
     PostgreSQLClient,
-    RedisClient,
     _row_to_dict,
 )
 
@@ -72,65 +71,6 @@ class TestPostgreSQLClientClose:
             side_effect=ConnectionRefusedError("refused"),
         ):
             client = PostgreSQLClient()
-            with pytest.raises(ConnectionRefusedError):
-                await client.connect()
-
-
-# ---------------------------------------------------------------------------
-# RedisClient — close and get_client
-# ---------------------------------------------------------------------------
-
-
-class TestRedisClientExtra:
-
-    @pytest.mark.asyncio
-    async def test_close_with_client_calls_close(self):
-        client = RedisClient()
-        mock_redis = AsyncMock()
-        client.client = mock_redis
-
-        await client.close()
-
-        mock_redis.close.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_close_without_client_is_noop(self):
-        client = RedisClient()
-        await client.close()  # should not raise
-
-    @pytest.mark.asyncio
-    async def test_get_client_returns_existing_client(self):
-        client = RedisClient()
-        mock_redis = MagicMock()
-        client.client = mock_redis
-
-        result = await client.get_client()
-
-        assert result is mock_redis
-
-    @pytest.mark.asyncio
-    async def test_get_client_connects_if_none(self):
-        """get_client() calls connect() when client is None."""
-        with patch("src.core.database.Redis") as mock_redis_cls:
-            mock_instance = MagicMock()
-            mock_instance.ping = AsyncMock(return_value=True)
-            mock_redis_cls.return_value = mock_instance
-
-            client = RedisClient()
-            result = await client.get_client()
-
-        assert result is mock_instance
-
-    @pytest.mark.asyncio
-    async def test_connect_raises_on_redis_failure(self):
-        with patch("src.core.database.Redis") as mock_redis_cls:
-            mock_instance = MagicMock()
-            mock_instance.ping = AsyncMock(
-                side_effect=ConnectionRefusedError("redis down")
-            )
-            mock_redis_cls.return_value = mock_instance
-
-            client = RedisClient()
             with pytest.raises(ConnectionRefusedError):
                 await client.connect()
 
@@ -292,4 +232,4 @@ class TestFindSimilarRequestsLocalFallback:
         assert result == []
 
 
-# Made with Bob
+

@@ -6,6 +6,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, SystemMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, StateGraph
+from openai import BadRequestError
 
 from src.config.settings import (
     app_config,
@@ -17,6 +18,7 @@ from src.core.database import (
     find_similar_requests,
     save_request,
 )
+from src.core.guardrails import guardrail_node
 from src.core.llm import get_embedding_model, get_llm
 from src.core.models import (
     ChatResponse,
@@ -70,13 +72,29 @@ class ConversationWorkflow:
             messages = [SystemMessage(content=prompt_config.system_prompt)] + messages
 
         # Get structured chat response (using pre-created structured LLM)
-        result = await self.llm_chat.ainvoke(messages)
+        try:
+            result = await self.llm_chat.ainvoke(messages)
+        except BadRequestError as exc:
+            if exc.status_code != 400:
+                raise
+            logger.warning("Chat blocked by provider content policy: %s", exc)
+            return {
+                "messages": [AIMessage(
+                    content=(
+                        "⚠️ I can't help with that request. Please "
+                        "rephrase it as a legitimate engineering "
+                        "service desk request and try again."
+                    )
+                )],
+                "is_ready": False,
+            }
 
         logger.info(f"Chat response: is_ready={result.is_ready}")
 
         return {
             "messages": [AIMessage(content=result.response)],
             "is_ready": result.is_ready,
+            "request_active": True,
         }
 
     async def extract_node(self, state: ConversationState) -> dict[str, Any]:
@@ -108,7 +126,8 @@ class ConversationWorkflow:
 
             return {
                 "collected_data": data,
-                "is_complete": True,
+                "is_complete": False,
+                "request_active": True,
                 "config_version": prompt_config.config_version,
             }
 
@@ -124,6 +143,7 @@ class ConversationWorkflow:
                 )],
                 "is_ready": True,
                 "is_complete": False,
+                "request_active": True,
             }
 
     async def _vector_search_stage(
@@ -336,6 +356,7 @@ class ConversationWorkflow:
             "messages": [duplicate_msg],
             "awaiting_duplicate_decision": True,
             "is_complete": False,
+            "request_active": True,
         }
 
     async def handle_duplicate_decision_node(self, state: ConversationState) -> dict[str, Any]:
@@ -382,6 +403,7 @@ class ConversationWorkflow:
                     "collected_data": {},
                     "is_ready": False,
                     "is_complete": False,
+                    "request_active": True,
                     "duplicate_warning": [],
                     "awaiting_duplicate_decision": False,
                     "duplicate_decision": "modify",
@@ -401,6 +423,7 @@ class ConversationWorkflow:
                 )
                 return {
                     "awaiting_duplicate_decision": False,
+                    "request_active": True,
                     "duplicate_warning": [],
                     "duplicate_decision": "proceed",
                     "messages": [AIMessage(
@@ -417,7 +440,11 @@ class ConversationWorkflow:
                 )
                 return {
                     "awaiting_duplicate_decision": False,
+                    "collected_data": {},
+                    "is_ready": False,
                     "is_complete": False,
+                    "request_active": False,
+                    "duplicate_warning": [],
                     "duplicate_decision": "cancel",
                     "messages": [AIMessage(
                         content=(
@@ -475,6 +502,7 @@ class ConversationWorkflow:
                 )],
                 "is_complete": False,
                 "is_ready": True,
+                "request_active": True,
             }
         collected_data = collected_data.copy()
 
@@ -497,6 +525,7 @@ class ConversationWorkflow:
                         f"Thank you!"
             )],
             "is_complete": True,
+            "request_active": False,
         }
 
     def should_extract(self, state: ConversationState) -> str:
@@ -547,17 +576,25 @@ class ConversationWorkflow:
         # 'cancel' or unrecognised (None) — end the turn
         return END
 
-    def route_entry(self, state: ConversationState) -> str:
+    def route_after_guardrail(
+        self, state: ConversationState
+    ) -> str:
         """
-        Entry point routing.
+        Routing after guardrail_node.
 
-        Routes to appropriate node based on state.
+        Guardrail is always the true entry point — every user
+        message passes through it regardless of conversation phase.
+        After it clears the input, route to the correct downstream
+        node based on state:
+
+        - injection blocked → END (blocked message already in state)
+        - awaiting duplicate decision → handle_duplicate_decision
+        - otherwise → chat
         """
-        # If we're waiting for duplicate decision, route to handler
+        if state.get("injection_blocked"):
+            return END
         if state.get("awaiting_duplicate_decision"):
             return "handle_duplicate_decision"
-
-        # Otherwise, normal chat flow
         return "chat"
 
     def build_graph(self) -> StateGraph:
@@ -565,6 +602,8 @@ class ConversationWorkflow:
         Build the LangGraph workflow.
 
         Flow:
+        0. guardrail        — PII redaction + injection detection
+                              (always first — every user message passes through)
         1. chat             — collect details through conversation
         2. extract          — structure the conversation into data fields
         3. duplicate_check  — two-stage fuzzy → vector similarity search
@@ -581,19 +620,28 @@ class ConversationWorkflow:
         workflow = StateGraph(ConversationState)
 
         # Add nodes
+        workflow.add_node("guardrail", guardrail_node)
         workflow.add_node("chat", self.chat_node)
         workflow.add_node("extract", self.extract_node)
         workflow.add_node("duplicate_check", self.duplicate_check_node)
         workflow.add_node("handle_duplicate_decision", self.handle_duplicate_decision_node)
         workflow.add_node("save", self.save_node)
 
-        # Entry point: route to duplicate-decision handler if we are
-        # waiting for a reply, otherwise start fresh in chat.
-        workflow.set_conditional_entry_point(
-            self.route_entry,
+        # Guardrail is always the unconditional entry point.
+        # Every user message — whether it is a first turn, a mid-
+        # conversation reply, or the 'proceed'/'cancel' answer to a
+        # duplicate warning — passes through PII redaction and
+        # injection detection before reaching any other node.
+        workflow.set_entry_point("guardrail")
+
+        # guardrail → END (blocked) | handle_duplicate_decision | chat
+        workflow.add_conditional_edges(
+            "guardrail",
+            self.route_after_guardrail,
             {
-                "chat": "chat",
+                END: END,
                 "handle_duplicate_decision": "handle_duplicate_decision",
+                "chat": "chat",
             }
         )
 
@@ -641,7 +689,7 @@ class ConversationWorkflow:
         Compile the workflow with the provided checkpointer.
 
         Args:
-            checkpointer: LangGraph checkpointer (e.g., RedisSaver, InMemorySaver)
+            checkpointer: LangGraph checkpointer (e.g., AsyncPostgresSaver, InMemorySaver)
 
         Returns:
             Compiled LangGraph application
@@ -668,4 +716,4 @@ class ConversationWorkflow:
         return self.app
 
 
-# Made with Bob
+

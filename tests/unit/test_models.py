@@ -1,4 +1,4 @@
-"""Unit tests for API models (src/api/models.py)."""
+"""Unit tests for API models (src/api/models.py) and ConversationState."""
 
 import pytest
 from pydantic import ValidationError
@@ -43,6 +43,21 @@ class TestChatRequest:
             req = ChatRequest(session_id=sid, message="hi")
             assert req.session_id == sid
 
+    def test_message_max_length_accepted(self):
+        """A message exactly at the 2000-char limit must be accepted."""
+        req = ChatRequest(session_id="s1", message="x" * 2000)
+        assert len(req.message) == 2000
+
+    def test_message_over_max_length_raises(self):
+        """A message exceeding 2000 characters must be rejected."""
+        with pytest.raises(ValidationError):
+            ChatRequest(session_id="s1", message="x" * 2001)
+
+    def test_empty_message_raises(self):
+        """An empty message must be rejected (min_length=1)."""
+        with pytest.raises(ValidationError):
+            ChatRequest(session_id="s1", message="")
+
 
 class TestChatResponseModel:
     """Tests for the API ChatResponse model (src/api/models.py)."""
@@ -53,6 +68,7 @@ class TestChatResponseModel:
         assert resp.response == "Hi"
         assert resp.is_ready is False
         assert resp.is_complete is False
+        assert resp.request_active is True
         assert resp.collected_data is None
         assert resp.duplicate_warning is None
 
@@ -62,11 +78,13 @@ class TestChatResponseModel:
             response="Done",
             is_ready=True,
             is_complete=True,
+            request_active=False,
             collected_data={"request_type": "infra"},
             duplicate_warning=[{"id": "abc", "similarity_score": 0.9}],
         )
         assert resp.is_ready is True
         assert resp.is_complete is True
+        assert resp.request_active is False
         assert resp.collected_data == {"request_type": "infra"}
         assert len(resp.duplicate_warning) == 1
 
@@ -76,6 +94,7 @@ class TestChatResponseModel:
 
     def test_defaults_for_optional_fields(self):
         resp = ChatResponse(session_id="s4", response="test")
+        assert resp.request_active is True
         assert resp.collected_data is None
         assert resp.duplicate_warning is None
 
@@ -104,34 +123,65 @@ class TestHealthResponse:
 
     def test_healthy_response(self):
         resp = HealthResponse(
-            status="healthy", postgresql="connected", redis="connected"
+            status="healthy", postgresql="connected"
         )
         assert resp.status == "healthy"
         assert resp.postgresql == "connected"
-        assert resp.redis == "connected"
 
     def test_unhealthy_response(self):
         resp = HealthResponse(
             status="unhealthy",
             postgresql="disconnected",
-            redis="disabled (dev mode)",
         )
         assert resp.status == "unhealthy"
 
     def test_missing_fields_raises(self):
         with pytest.raises(ValidationError):
             HealthResponse(  # type: ignore[call-arg]
-                status="healthy", postgresql="connected"
+                status="healthy"
             )
 
     def test_serialisation_round_trip(self):
         """Model can be serialised to dict and reconstructed."""
         original = HealthResponse(
-            status="healthy", postgresql="connected", redis="connected"
+            status="healthy", postgresql="connected"
         )
         data = original.model_dump()
         reconstructed = HealthResponse(**data)
         assert reconstructed == original
 
 
-# Made with Bob
+class TestConversationState:
+    """Tests for the ConversationState TypedDict fields."""
+
+    def test_injection_blocked_field_exists(self):
+        """ConversationState must declare the injection_blocked key."""
+        from src.core.models import ConversationState
+
+        annotations = ConversationState.__annotations__
+        assert "injection_blocked" in annotations
+
+    def test_injection_blocked_is_bool(self):
+        """injection_blocked must be typed as bool."""
+        from src.core.models import ConversationState
+
+        assert ConversationState.__annotations__["injection_blocked"] is bool
+
+    def test_state_with_injection_blocked_true(self):
+        """A state dict with injection_blocked=True is well-formed."""
+        state: dict = {
+            "messages": [],
+            "is_ready": False,
+            "is_complete": False,
+            "request_active": True,
+            "injection_blocked": True,
+        }
+        assert state["injection_blocked"] is True
+
+    def test_state_without_injection_blocked_defaults_via_get(self):
+        """Absent injection_blocked should default to falsy via .get()."""
+        state: dict = {"messages": [], "is_ready": False}
+        assert not state.get("injection_blocked")
+
+
+

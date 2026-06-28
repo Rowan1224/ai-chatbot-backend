@@ -1,6 +1,5 @@
 """Pydantic models and state definitions for the conversation workflow."""
 
-import operator
 from typing import (
     Annotated,
     Any,
@@ -8,6 +7,7 @@ from typing import (
 )
 
 from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 
 
@@ -66,13 +66,18 @@ class ConversationState(TypedDict, total=False):
     than direct key access.
     """
 
-    messages: Annotated[list[BaseMessage], operator.add]
+    messages: Annotated[list[BaseMessage], add_messages]
     collected_data: dict[str, Any]
     is_ready: bool
     is_complete: bool
+    request_active: bool
     duplicate_warning: list[dict[str, Any]]
     config_version: str
     awaiting_duplicate_decision: bool
     # 'modify' | 'proceed' | 'cancel' | None — set by
     # handle_duplicate_decision_node so the router can branch cleanly
     duplicate_decision: str | None
+    # Set to True by guardrail_node when a prompt injection attempt
+    # is detected; causes route_after_guardrail to END the turn
+    # without reaching the chat node.
+    injection_blocked: bool

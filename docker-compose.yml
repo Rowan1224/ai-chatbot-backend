@@ -20,23 +20,6 @@ services:
     networks:
       - ai-chatbot-network
 
-  # Redis service for LangGraph checkpointing
-  redis:
-    image: redis/redis-stack-server:latest
-    container_name: ai-chatbot-redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-    networks:
-      - ai-chatbot-network
-
   # FastAPI application
   api:
     build:
@@ -51,13 +34,9 @@ services:
     environment:
       # Override specific variables for Docker environment
       - POSTGRESQL_URL=postgresql://chatbot:chatbot_password@postgres:5432/chatbot
-      - REDIS_URL=redis://redis:6379
-      - REDIS_HOST=redis
       - ENVIRONMENT=production
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
@@ -84,7 +63,5 @@ networks:
 volumes:
   postgres_data:
     driver: local
-  redis_data:
-    driver: local
 
-# Made with Bob
+
