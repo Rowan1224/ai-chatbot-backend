@@ -89,7 +89,7 @@ class ConversationWorkflow:
                 "is_ready": False,
             }
 
-        logger.info(f"Chat response: is_ready={result.is_ready}")
+        logger.info("Chat response: is_ready=%s", result.is_ready)
 
         return {
             "messages": [AIMessage(content=result.response)],
@@ -132,7 +132,7 @@ class ConversationWorkflow:
             }
 
         except Exception as e:
-            logger.error(f"Extraction failed: {e}")
+            logger.error("Extraction failed: %s", e)
             # Keep is_ready=True so the next user message re-triggers
             # extract_node — the conversation history still has all
             # the data, no need to collect it again.
@@ -390,7 +390,7 @@ class ConversationWorkflow:
                 messages
             )
             choice = result.choice.lower().strip()
-            logger.info(f"Parsed duplicate decision: {choice}")
+            logger.info("Parsed duplicate decision: %s", choice)
 
             if choice == "modify":
                 # Clear extraction state so the user can refine their
@@ -471,7 +471,7 @@ class ConversationWorkflow:
                 }
 
         except Exception as e:
-            logger.error(f"Error parsing duplicate decision: {e}")
+            logger.error("Error parsing duplicate decision: %s", e)
             return {
                 "duplicate_decision": None,
                 "messages": [AIMessage(
@@ -516,7 +516,7 @@ class ConversationWorkflow:
 
         logger.info("Save node: Creating new request")
         request_id = await save_request(self.pg_client, collected_data, embedding)
-        logger.info(f"Request saved with ID: {request_id}")
+        logger.info("Request saved with ID: %s", request_id)
 
         return {
             "messages": [AIMessage(
@@ -698,7 +698,7 @@ class ConversationWorkflow:
         graph = self.build_graph()
         self.app = graph.compile(checkpointer=checkpointer)
 
-        logger.info(f"LangGraph workflow compiled with {type(checkpointer).__name__}")
+        logger.info("LangGraph workflow compiled with %s", type(checkpointer).__name__)
 
         return self.app
 

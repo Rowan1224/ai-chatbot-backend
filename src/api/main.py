@@ -76,6 +76,12 @@ async def check_rate_limit(request: Request) -> None:
             break
         window.popleft()
 
+    # Evict sessions whose window is now empty so the store doesn't grow
+    # unboundedly when many unique session IDs are seen.
+    if not window and session_id in _rate_limit_store:
+        del _rate_limit_store[session_id]
+        window = _rate_limit_store.setdefault(session_id, deque())
+
     if len(window) >= rpm:
         retry_after = int(_WINDOW - (now - window[0])) + 1
         raise HTTPException(
@@ -93,6 +99,23 @@ async def check_rate_limit(request: Request) -> None:
 # ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
+
+
+async def _setup_and_run(app: FastAPI, pg_client: PostgreSQLClient, checkpointer):
+    """Shared startup/yield/shutdown logic for both checkpointer branches."""
+    workflow = ConversationWorkflow(pg_client=pg_client)
+    conversation_app = workflow.compile(checkpointer=checkpointer)
+    logger.info("LangGraph workflow compiled")
+
+    app.state.pg_client = pg_client
+    app.state.conversation_app = conversation_app
+
+    yield
+
+    # Shutdown
+    logger.info("Shutting down AI Chatbot Backend...")
+    await pg_client.close()
+    logger.info("PostgreSQL connection closed")
 
 
 @asynccontextmanager
@@ -119,8 +142,8 @@ async def lifespan(app: FastAPI):
                 raise
             wait = attempt * 2  # 2s, 4s
             logger.warning(
-                f"PostgreSQL connection attempt {attempt} failed "
-                f"({exc}); retrying in {wait}s…"
+                "PostgreSQL connection attempt %d failed (%s); retrying in %ds…",
+                attempt, exc, wait,
             )
             await asyncio.sleep(wait)
 
@@ -133,45 +156,14 @@ async def lifespan(app: FastAPI):
         ) as checkpointer:
             await checkpointer.setup()
             logger.info("Using Postgres checkpointer")
-
-            workflow = ConversationWorkflow(pg_client=pg_client)
-            conversation_app = workflow.compile(
-                checkpointer=checkpointer
-            )
-            logger.info("LangGraph workflow compiled")
-
-            app.state.pg_client = pg_client
-            app.state.conversation_app = conversation_app
-
-            yield
-
-            # Shutdown
-            logger.info("Shutting down AI Chatbot Backend...")
-            await pg_client.close()
-            logger.info("PostgreSQL connection closed")
+            async for val in _setup_and_run(app, pg_client, checkpointer):
+                yield val
     else:
         # Development: InMemory — no DB dependency, sessions lost on restart
         checkpointer = InMemorySaver()
-        logger.info(
-            "Using InMemory checkpointer "
-            "(dev mode - no persistence)"
-        )
-
-        workflow = ConversationWorkflow(pg_client=pg_client)
-        conversation_app = workflow.compile(
-            checkpointer=checkpointer
-        )
-        logger.info("LangGraph workflow compiled")
-
-        app.state.pg_client = pg_client
-        app.state.conversation_app = conversation_app
-
-        yield
-
-        # Shutdown
-        logger.info("Shutting down AI Chatbot Backend...")
-        await pg_client.close()
-        logger.info("PostgreSQL connection closed")
+        logger.info("Using InMemory checkpointer (dev mode - no persistence)")
+        async for val in _setup_and_run(app, pg_client, checkpointer):
+            yield val
 
 
 # Create FastAPI app
@@ -230,7 +222,7 @@ async def chat(
     If duplicates are found the bot pauses and asks the user to choose:
     'proceed', 'modify', or 'cancel'.
     """
-    logger.info(f"Chat request from session {request.session_id}: {request.message}")
+    logger.info("Chat request from session %s: %s", request.session_id, request.message)
 
     try:
         # Invoke LangGraph workflow
@@ -243,7 +235,7 @@ async def chat(
         last_message = result["messages"][-1] if result.get("messages") else None
         response_text = last_message.content if last_message else "No response generated"
 
-        logger.info(f"Chat response for session {request.session_id}: is_complete={result.get('is_complete', False)}")
+        logger.info("Chat response for session %s: is_complete=%s", request.session_id, result.get("is_complete", False))
 
         return ChatResponse(
             session_id=request.session_id,
@@ -257,7 +249,7 @@ async def chat(
 
     except BadRequestError as e:
         if e.status_code != 400:
-            logger.error(f"Error in chat endpoint: {e}", exc_info=True)
+            logger.error("Error in chat endpoint: %s", e, exc_info=True)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to process chat message: {str(e)}",
@@ -275,7 +267,7 @@ async def chat(
             ),
         ) from e
     except Exception as e:
-        logger.error(f"Error in chat endpoint: {e}", exc_info=True)
+        logger.error("Error in chat endpoint: %s", e, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to process chat message: {str(e)}",
@@ -303,7 +295,7 @@ async def get_session(
         )
 
     except Exception as e:
-        logger.error(f"Error getting session state: {e}", exc_info=True)
+        logger.error("Error getting session state: %s", e, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get session state: {str(e)}",
@@ -323,7 +315,7 @@ async def health_check() -> HealthResponse:
         await app.state.pg_client.ping()
         postgresql_status = "connected"
     except Exception as e:
-        logger.error(f"PostgreSQL health check failed: {e}")
+        logger.error("PostgreSQL health check failed: %s", e)
 
     overall_status = (
         "healthy" if postgresql_status == "connected" else "unhealthy"

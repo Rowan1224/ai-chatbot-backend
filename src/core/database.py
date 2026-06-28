@@ -3,7 +3,7 @@
 import json
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import asyncpg
@@ -145,11 +145,11 @@ async def save_request(
             prompt_config.config_version,
             json.dumps(data),
             embedding,
-            datetime.utcnow(),
+            datetime.now(UTC),
         )
 
     request_id = str(row_id)
-    logger.info(f"Saved request with ID: {request_id}")
+    logger.info("Saved request with ID: %s", request_id)
     return request_id
 
 
@@ -178,7 +178,7 @@ async def find_fuzzy_candidates(
     Returns:
         List of UUID strings for rows that pass the fuzzy filter
     """
-    cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+    cutoff = datetime.now(UTC) - timedelta(days=lookback_days)
 
     async with pg_client.pool.acquire() as conn:
         rows = await conn.fetch(

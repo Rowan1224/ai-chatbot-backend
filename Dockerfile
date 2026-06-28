@@ -52,7 +52,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)" || exit 1
 
 # Run with Gunicorn + Uvicorn workers for production
-# --workers: Number of worker processes (2-4 x CPU cores recommended)
+# --workers: set to 1 for local testing; use 2+ (or $(nproc)) in production
 # --worker-class: Use Uvicorn's async worker
 # --bind: Listen on all interfaces
 # --timeout: Worker timeout (important for LLM calls)
