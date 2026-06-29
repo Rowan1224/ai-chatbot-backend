@@ -7,6 +7,16 @@ import pytest
 from fastapi.testclient import TestClient
 from openai import BadRequestError
 
+# Ensure settings singleton uses the test API key regardless
+# of what value was loaded from .env at import time.
+@pytest.fixture(autouse=True)
+def patch_settings_api_key():
+    with patch("src.api.main.settings") as mock_settings:
+        mock_settings.api_key = "test-api-key"
+        mock_settings.use_postgres_checkpointer = False
+        mock_settings.log_level = "INFO"
+        yield mock_settings
+
 # ---------------------------------------------------------------------------
 # App fixture — patches lifespan so no real DB is needed
 # ---------------------------------------------------------------------------

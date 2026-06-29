@@ -35,6 +35,17 @@ _SCALE = 1.0 / math.sqrt(_DIM)
 EMBED = [_SCALE] * _DIM
 
 
+# Ensure settings singleton uses the test API key regardless
+# of what value was loaded from .env at import time.
+@pytest.fixture(autouse=True)
+def patch_settings_api_key():
+    with patch("src.api.main.settings") as mock_settings:
+        mock_settings.api_key = VALID_API_KEY
+        mock_settings.use_postgres_checkpointer = False
+        mock_settings.log_level = "INFO"
+        yield mock_settings
+
+
 # ---------------------------------------------------------------------------
 # Fixture — real app with injected state
 # ---------------------------------------------------------------------------
