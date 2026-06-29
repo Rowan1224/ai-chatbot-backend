@@ -9,6 +9,7 @@ A conversational API that collects structured service desk requests through natu
 - [Project structure](docs/project-structure.md) — what lives where
 - [Design decisions](docs/decisions.md) — why LangGraph, why pgvector, how duplicate detection works
 - [Deployment](docs/deployment.md) — production deployment and CI/CD
+- [Evaluation Plan](docs/evaluation-plan.md) - future evaluation plan for the system
 
 ## Quick start
 
